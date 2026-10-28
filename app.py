@@ -12,6 +12,8 @@ Abrir después http://127.0.0.1:8050 en el navegador.
 from __future__ import annotations
 
 import argparse
+import base64
+import io
 import os
 
 import numpy as np
@@ -19,7 +21,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, ctx, dcc, html, no_update
 
-from data_loader import bearing_rays, load_dataset
+from data_loader import _read_drone, _read_sensor, bearing_rays, build_dataset, load_dataset
 
 # --------------------------------------------------------------------------- #
 # Configuración visual
@@ -67,48 +69,53 @@ args, _ = parser.parse_known_args()
 
 DS = load_dataset(args.data)
 T0 = DS.t0
-DURATION = int((DS.t1 - DS.t0).total_seconds())
-
-ALL_CLASSES = sorted({str(c) for s in DS.sensors.values() for c in s.df["cls"].dropna().unique()})
+DURATION = 60
+ALL_CLASSES = []
 CLASS_COLORS = {}
-_c_idx = 0
-for _c in ALL_CLASSES:
-    if _c.strip().lower() in ("unknown", "desconocido", "unk", "none", ""):
-        CLASS_COLORS[_c] = "#555d66"  # Grisáceo poco visible
-    else:
-        CLASS_COLORS[_c] = SENSOR_COLORS[_c_idx % len(SENSOR_COLORS)]
-        _c_idx += 1
-
-for i, s in enumerate(DS.sensors.values()):
-    s.color = SENSOR_COLORS[i % len(SENSOR_COLORS)]
-    s.symbol = SENSOR_SYMBOLS[i % len(SENSOR_SYMBOLS)]
-    s.df["ts"] = (s.df["t"] - T0).dt.total_seconds()
-    s.df["tlabel"] = s.df["t"].dt.strftime("%H:%M:%S.%f").str[:-3]
-
-_team_idx = {}
-for d in DS.drones.values():
-    k = _team_idx.get(d.team, 0)
-    d.color = DRONE_COLORS.get(d.team, ["#cccccc"])[k % len(DRONE_COLORS.get(d.team, ["#cccccc"]))]
-    _team_idx[d.team] = k + 1
-    d.df["ts"] = (d.df["t"] - T0).dt.total_seconds()
-    d.df["tlabel"] = d.df["t"].dt.strftime("%H:%M:%S")
-
-print("\n=== Datos cargados ===")
-print(f"Origen ENU: lon {DS.proj.lon0:.6f}, lat {DS.proj.lat0:.6f} | cota terreno (elipsoide) ≈ {DS.ground_ref:.1f} m")
-print(f"Intervalo: {DS.t0} → {DS.t1} ({DURATION} s)")
-for s in DS.sensors.values():
-    print(f"  [sensor] {s.key:<34} {len(s.df):>6} det. | confianza: {s.conf_source} | {s.z_note}")
-for d in DS.drones.values():
-    print(f"  [drone ] {d.key:<34} {len(d.df):>6} pts")
-print()
-
-# Límites de los ejes (fijos para que no "salten" durante la reproducción)
-# (envolvente de drones y sensores + margen; los puntos fuera de rango no se dibujan)
-_e = pd.concat([d.df["e"] for d in DS.drones.values()] + [pd.Series([s.pos_e]) for s in DS.sensors.values()])
-_n = pd.concat([d.df["n"] for d in DS.drones.values()] + [pd.Series([s.pos_n]) for s in DS.sensors.values()])
+XR = [-1000.0, 1000.0]
+YR = [-1000.0, 1000.0]
 MARGIN = 700
-XR = [float(_e.min()) - MARGIN, float(_e.max()) + MARGIN]
-YR = [float(_n.min()) - MARGIN, float(_n.max()) + MARGIN]
+
+
+def _refresh_globals():
+    global T0, DURATION, ALL_CLASSES, CLASS_COLORS, XR, YR
+    T0 = DS.t0
+    DURATION = max(1, int((DS.t1 - DS.t0).total_seconds()))
+
+    ALL_CLASSES = sorted({str(c) for s in DS.sensors.values() for c in s.df["cls"].dropna().unique()})
+    CLASS_COLORS = {}
+    _c_idx = 0
+    for _c in ALL_CLASSES:
+        if _c.strip().lower() in ("unknown", "desconocido", "unk", "none", ""):
+            CLASS_COLORS[_c] = "#555d66"
+        else:
+            CLASS_COLORS[_c] = SENSOR_COLORS[_c_idx % len(SENSOR_COLORS)]
+            _c_idx += 1
+
+    for i, s in enumerate(DS.sensors.values()):
+        s.color = SENSOR_COLORS[i % len(SENSOR_COLORS)]
+        s.symbol = SENSOR_SYMBOLS[i % len(SENSOR_SYMBOLS)]
+        s.df["ts"] = (s.df["t"] - T0).dt.total_seconds()
+        s.df["tlabel"] = s.df["t"].dt.strftime("%H:%M:%S.%f").str[:-3]
+
+    _team_idx = {}
+    for d in DS.drones.values():
+        k = _team_idx.get(d.team, 0)
+        d.color = DRONE_COLORS.get(d.team, ["#cccccc"])[k % len(DRONE_COLORS.get(d.team, ["#cccccc"]))]
+        _team_idx[d.team] = k + 1
+        d.df["ts"] = (d.df["t"] - T0).dt.total_seconds()
+        d.df["tlabel"] = d.df["t"].dt.strftime("%H:%M:%S")
+
+    e_series = [d.df["e"] for d in DS.drones.values()] + [pd.Series([s.pos_e]) for s in DS.sensors.values()]
+    n_series = [d.df["n"] for d in DS.drones.values()] + [pd.Series([s.pos_n]) for s in DS.sensors.values()]
+    if e_series and n_series:
+        _e = pd.concat(e_series)
+        _n = pd.concat(n_series)
+        XR = [float(_e.min()) - MARGIN, float(_e.max()) + MARGIN]
+        YR = [float(_n.min()) - MARGIN, float(_n.max()) + MARGIN]
+
+
+_refresh_globals()
 
 
 # --------------------------------------------------------------------------- #
@@ -274,11 +281,21 @@ def section(title, *children):
     return html.Div([html.Div(title, className="sec-title"), *children], className="section")
 
 
-sensor_options = [{"label": html.Span([html.Span(s.key), html.Span(f"  {len(s.df)}" + (" · marcación" if s.bearing_only else ""), className="sub", style={"fontSize": "11px"})]),
-                   "value": k} for k, s in DS.sensors.items()]
-drone_options = [{"label": swatch(d.color, d.key, f"{d.df['t'].min():%H:%M:%S}–{d.df['t'].max():%H:%M:%S}"),
-                  "value": k} for k, d in DS.drones.items()]
-marks = {int(s): (T0 + pd.Timedelta(seconds=int(s))).strftime("%H:%M") for s in range(0, DURATION + 1, 60)}
+def _get_sensor_options():
+    return [{"label": html.Span([html.Span(s.key), html.Span(f"  {len(s.df)}" + (" · marcación" if s.bearing_only else ""), className="sub", style={"fontSize": "11px"})]),
+            "value": k} for k, s in DS.sensors.items()]
+
+def _get_drone_options():
+    return [{"label": swatch(d.color, d.key, f"{d.df['t'].min():%H:%M:%S}–{d.df['t'].max():%H:%M:%S}"),
+            "value": k} for k, d in DS.drones.items()]
+
+def _get_marks():
+    step = max(60, (DURATION // 10 // 60) * 60)
+    return {int(s): (T0 + pd.Timedelta(seconds=int(s))).strftime("%H:%M") for s in range(0, DURATION + 1, step)}
+
+sensor_options = _get_sensor_options()
+drone_options = _get_drone_options()
+marks = _get_marks()
 
 app = Dash(__name__, title="Visor 3D multisensor")
 app.index_string = app.index_string.replace("</head>", f"""
@@ -307,8 +324,17 @@ app.index_string = app.index_string.replace("</head>", f"""
 app.layout = html.Div(style={"display": "flex", "height": "100vh"}, children=[
     html.Div(className="sidebar", children=[
         html.H3("Visor 3D multisensor", style={"margin": "0 0 4px 0", "fontSize": "17px"}),
-        html.Div(f"{T0:%d/%m/%Y} · {DS.t0:%H:%M:%S}–{DS.t1:%H:%M:%S} UTC", className="help",
+    html.Div(f"{T0:%d/%m/%Y} · {DS.t0:%H:%M:%S}–{DS.t1:%H:%M:%S} UTC", id="date-range", className="help",
                  style={"marginBottom": "12px"}),
+
+        section("Cargar datos",
+                dcc.Upload(
+                    id="upload-data",
+                    children=html.Button("＋ Add sensor / drone CSV", className="btn", style={"width": "100%"}),
+                    multiple=True,
+                    accept=".csv"
+                ),
+                html.Div(id="upload-status", className="help", style={"marginTop": "4px"})),
 
         section("Reproducción",
                 html.Div([
@@ -445,7 +471,53 @@ def _update(t, sensors_on, drones_on, opts, color_mode, min_conf, ray_len, z_max
     clock = (T0 + pd.Timedelta(seconds=t)).strftime("%H:%M:%S")
     return fig, clock, f"{n_pts:,} detecciones visibles".replace(",", ".")
 
+@app.callback(
+    Output("sensors", "options"), Output("sensors", "value", allow_duplicate=True),
+    Output("drones", "options"), Output("drones", "value", allow_duplicate=True),
+    Output("time", "max"), Output("time", "marks"), Output("time", "value", allow_duplicate=True),
+    Output("date-range", "children"), Output("upload-status", "children"),
+    Input("upload-data", "contents"),
+    State("upload-data", "filename"),
+    State("sensors", "value"), State("drones", "value"),
+    prevent_initial_call=True
+)
+def _upload_csv(contents_list, filenames, current_sensors, current_drones):
+    global DS
+    if not contents_list:
+        return (no_update,) * 9
 
+    sensors_dict = dict(DS.sensors)
+    drones_dict = dict(DS.drones)
+    new_sensors, new_drones, errors = [], [], []
+
+    for content, fname in zip(contents_list, filenames):
+        try:
+            _, content_string = content.split(",", 1)
+            decoded = base64.b64decode(content_string).decode("utf-8", errors="replace")
+            buf = io.StringIO(decoded)
+            if fname.startswith("DroneTag_") or "geo_altitude" in decoded[:500]:
+                dr = _read_drone(buf, filename=fname)
+                drones_dict[dr.key] = dr
+                new_drones.append(dr.key)
+            else:
+                s = _read_sensor(buf, filename=fname)
+                sensors_dict[s.key] = s
+                new_sensors.append(s.key)
+        except Exception as e:
+            errors.append(f"{fname}: {e}")
+
+    DS = build_dataset(list(sensors_dict.values()), list(drones_dict.values()))
+    _refresh_globals()
+
+    s_val = list(dict.fromkeys((current_sensors or []) + new_sensors))
+    d_val = list(dict.fromkeys((current_drones or []) + new_drones))
+    date_txt = f"{T0:%d/%m/%Y} · {DS.t0:%H:%M:%S}–{DS.t1:%H:%M:%S} UTC"
+    status = f"Cargados: {len(new_sensors)} sensores, {len(new_drones)} drones."
+    if errors:
+        status += " Error en: " + "; ".join(errors)
+
+    return (_get_sensor_options(), s_val, _get_drone_options(), d_val,
+            DURATION, _get_marks(), DURATION, date_txt, status)
 if __name__ == "__main__":
     print(f"Abrir http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)

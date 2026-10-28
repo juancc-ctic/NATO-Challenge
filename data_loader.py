@@ -12,6 +12,7 @@ import ast
 import glob
 import os
 import re
+import io
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -113,31 +114,38 @@ class Dataset:
 # --------------------------------------------------------------------------- #
 import re
 
-_SENSOR_RE = re.compile(r"(Delta|Charlie)_([A-Z0-9]+)_(.+?)_\d{6}_\d{4}_\d{4}")
+_SENSOR_RE = re.compile(r"([A-Za-z0-9]+)_([A-Z0-9]+)_(.+?)_\d{6}_\d{4}_\d{4}")
 _DRONE_RE = re.compile(r"DroneTag_([A-Z]+)_\d{6}_\d{4}_\d{4}_(.+?)(?:-\d+)?\.csv$")
 
 
-def _read_drone(path, proj=None):
-    m = _DRONE_RE.search(os.path.basename(path))
-    team, name = (m.group(1), m.group(2)) if m else ("?", os.path.basename(path))
-    df = pd.read_csv(path, index_col=0)
+def _read_drone(path_or_buf, filename=None):
+    base = filename or os.path.basename(str(path_or_buf))
+    m = _DRONE_RE.search(base)
+    team, name = (m.group(1), m.group(2)) if m else ("?", os.path.splitext(base)[0])
+    df = pd.read_csv(path_or_buf, index_col=0)
     df["t"] = pd.to_datetime(df["timestamp"])
     df = df.sort_values("t").reset_index(drop=True)
     df["speed"] = np.sqrt(df["velocity_x"] ** 2 + df["velocity_y"] ** 2 + df["velocity_z"] ** 2)
-    return Drone(key=f"{team} · {name}", name=name, team=team, file=os.path.basename(path), df=df)
+    return Drone(key=f"{team} · {name}", name=name, team=team, file=base, df=df)
 
 
-def _read_sensor(path):
-    base = os.path.basename(path)
+def _read_sensor(path_or_buf, filename=None):
+    base = filename or os.path.basename(str(path_or_buf))
     m = _SENSOR_RE.search(base)
-    prefix, node, kind = (m.group(1), m.group(2), m.group(3)) if m else ("", base, "?")
-    df = pd.read_csv(path, index_col=0)
+    if m:
+        prefix, node, kind = m.group(1), m.group(2), m.group(3)
+        key = f"{prefix} · {node} · {kind}"
+    else:
+        node, kind = os.path.splitext(base)[0], "CSV"
+        key = node
+
+    df = pd.read_csv(path_or_buf, index_col=0)
     df["t"] = pd.to_datetime(df["timestamp"])
 
     # Posición del sensor (en grados)
     slon, slat = _to_deg(df["sensor_location_x"].astype(float),
-                            df["sensor_location_y"].astype(float),
-                            df["sensor_location_coordinateSystem"].iloc[0])
+                        df["sensor_location_y"].astype(float),
+                        df["sensor_location_coordinateSystem"].iloc[0])
     df["s_lon"], df["s_lat"] = slon, slat
     df["s_z"] = df["sensor_location_z"].astype(float)
 
@@ -165,7 +173,7 @@ def _read_sensor(path):
     bearing_only = "location_x" not in df.columns
     if not bearing_only:
         lon, lat = _to_deg(df["location_x"].astype(float), df["location_y"].astype(float),
-                           df["location_coordinateSystem"].iloc[0])
+                        df["location_coordinateSystem"].iloc[0])
         df["lon"], df["lat"] = lon, lat
         df["z_raw"] = df["location_z"].astype(float)
     else:
@@ -180,20 +188,14 @@ def _read_sensor(path):
         df["state"] = ""
 
     df = df.sort_values("t").reset_index(drop=True)
-    return Sensor(key=f"{prefix} · {node} · {kind}" if prefix else f"{node} · {kind}",
-                    node=node, kind=kind, file=base,
-                    bearing_only=bearing_only, conf_source=src, df=df)
+    return Sensor(key=key, node=node, kind=kind, file=base,
+                bearing_only=bearing_only, conf_source=src, df=df)
 
 
 def _estimate_z_offset(sensor: Sensor, drones: dict, max_dist=25.0, max_dt=1.0, min_matches=15):
-    """
-    Estima el desfase vertical entre las detecciones de un sensor y la altitud
-    elipsoidal GNSS de los drones (geo_altitude), emparejando detecciones
-    cercanas en tiempo (<1 s) y en planta (<25 m).
-    """
     d = sensor.df
-    if sensor.bearing_only or d.empty:
-        return None, 0
+    if sensor.bearing_only or d.empty or not drones:
+        return None, 0, True
     allr = pd.concat([dr.df[["t", "e", "n", "geo_altitude"]].assign(drone=k) for k, dr in drones.items()])
     allr = allr.sort_values("t").reset_index(drop=True)
     tt = allr["t"].values.astype("datetime64[ns]").astype(np.int64) / 1e9
@@ -220,26 +222,18 @@ def _estimate_z_offset(sensor: Sensor, drones: dict, max_dist=25.0, max_dt=1.0, 
     return float(per.median()), len(diffs), bool(consistent)
 
 
-def load_dataset(data_dir: str) -> Dataset:
-    sensor_files = sorted(
-        glob.glob(os.path.join(data_dir, "Delta_*.csv"))
-        + glob.glob(os.path.join(data_dir, "Charlie_*.csv"))
-    )
-    drone_files = sorted(glob.glob(os.path.join(data_dir, "DroneTag_*.csv")))
-    if not sensor_files and not drone_files:
-        raise FileNotFoundError(f"No se han encontrado CSV en {data_dir}")
+def build_dataset(sensors: list[Sensor], drones: list[Drone]) -> Dataset:
+    if not sensors and not drones:
+        now = pd.Timestamp.utcnow().floor("s")
+        return Dataset(sensors={}, drones={}, proj=Projection(0.0, 0.0),
+                       ground_ref=0.0, t0=now, t1=now + pd.Timedelta(seconds=60))
 
-    sensors = [_read_sensor(f) for f in sensor_files]
-    drones = [_read_drone(f) for f in drone_files]
-
-    # Origen de la proyección: centro de las trayectorias + sensores
     lons = [dr.df["longitude"] for dr in drones] + [s.df["s_lon"] for s in sensors]
     lats = [dr.df["latitude"] for dr in drones] + [s.df["s_lat"] for s in sensors]
     lon0 = float(pd.concat(lons).median())
     lat0 = float(pd.concat(lats).median())
     proj = Projection(lon0, lat0)
 
-    # Cota del terreno (altitud elipsoidal) estimada con los drones en tierra
     grounded = pd.concat([dr.df.loc[dr.df["height"].abs() < 1.0, "geo_altitude"] for dr in drones]) \
         if drones else pd.Series(dtype=float)
     ground_ref = float(grounded.median()) if len(grounded) else 0.0
@@ -254,7 +248,6 @@ def load_dataset(data_dir: str) -> Dataset:
         d = s.df
         s.pos_e, s.pos_n = map(float, proj.enu(d["s_lon"].median(), d["s_lat"].median()))
         s.pos_z_raw = float(d["s_z"].median())
-        # Si la cota del sensor es muy inferior al terreno, se asume altura sobre el suelo
         sensor_is_agl = s.pos_z_raw < ground_ref - 20
         s.pos_z_agl = s.pos_z_raw if sensor_is_agl else s.pos_z_raw - ground_ref
 
@@ -279,11 +272,18 @@ def load_dataset(data_dir: str) -> Dataset:
         else:
             s.z_note = "sensor de sólo marcación (sin distancia): se dibujan rayos"
 
-    t_all = [s.df["t"] for s in sensors] + [dr.df["t"] for dr in drones]
-    t_all = pd.concat(t_all)
+    t_all = pd.concat([s.df["t"] for s in sensors] + [dr.df["t"] for dr in drones])
     return Dataset(sensors={s.key: s for s in sensors}, drones=drones_d, proj=proj,
-                   ground_ref=ground_ref, t0=t_all.min().floor("s"), t1=t_all.max().ceil("s"))
+                ground_ref=ground_ref, t0=t_all.min().floor("s"), t1=t_all.max().ceil("s"))
 
+
+def load_dataset(data_dir: str) -> Dataset:
+    all_csvs = sorted(glob.glob(os.path.join(data_dir, "*.csv"))) if os.path.isdir(data_dir) else []
+    drone_files = [f for f in all_csvs if os.path.basename(f).startswith("DroneTag_")]
+    sensor_files = [f for f in all_csvs if not os.path.basename(f).startswith("DroneTag_")]
+    sensors = [_read_sensor(f) for f in sensor_files]
+    drones = [_read_drone(f) for f in drone_files]
+    return build_dataset(sensors, drones)
 
 def bearing_rays(sensor: Sensor, df: pd.DataFrame, length: float, use_agl: bool):
     """Calcula el extremo de cada rayo de marcación (azimut desde el norte, horario)."""
