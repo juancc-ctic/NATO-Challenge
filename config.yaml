@@ -1,0 +1,132 @@
+# Rutas y metadatos del proyecto.
+project:
+  name: nato-cuas
+  timezone: UTC
+  # CSV originales; enlaces de solo lectura.
+  raw:
+    test: data/raw/test
+    eval: data/raw/eval
+  # Tablas normalizadas y auditoría.
+  interim: data/interim
+  reports: reports
+  out: out
+
+# Parámetros del ETL y de la base de datos interim.
+etl:
+  # Elimina filas exactamente duplicadas por sensor e iteración.
+  deduplicate: true
+  # Conserva pájaros/coches para filtrarlos después; no se entregan.
+  keep_non_drone: true
+  # Escribe también una copia CSV además de Parquet.
+  write_csv_copy: false
+  # Compresión de los Parquet.
+  parquet_compression: zstd
+  # Sigma por defecto si el sensor no reporta error, en metros.
+  default_sigma_m:
+    radar: 15.0
+    cyber: 50.0
+    fusion: 20.0
+    other: 50.0
+    rf: 100.0
+    acoustic: 50.0
+    camera: 10.0
+  # Límites de sigma tras convertir y recortar.
+  sigma_floor_m: 0.5
+  sigma_cap_m: 5000.0
+  # Origen ENU local por iteración.
+  enu:
+    # Mediana de las posiciones de sensor válidas de la iteración.
+    origin_mode: median_sensor_location
+    # Origen de emergencia si no hay posiciones de sensor.
+    fallback_origin:
+      lat: 51.52
+      lon: 5.86
+      alt_m: 0.0
+  # Velocidad máxima plausible para descartar saltos, en m/s.
+  max_plausible_speed_mps: 90.0
+  # Sensores cuyo location_* es posición del objeto.
+  position_capable_sensor_types:
+    - radar
+    - cyber
+    - fusion
+    - other
+  # Sensores que solo dan azimut/elevación, no posición.
+  bearing_only_sensor_types:
+    - rf
+    - acoustic
+    - camera
+  # Sensores que solo existen en test.
+  test_only_sensor_types:
+    - fusion
+  # Bandas de frecuencia para metadatos.
+  frequency_bands_mhz:
+    - name: 433 MHz
+      min: 400
+      max: 470
+    - name: 868 MHz
+      min: 850
+      max: 930
+    - name: 915 MHz
+      min: 900
+      max: 960
+    - name: 1.2 GHz
+      min: 1100
+      max: 1300
+    - name: 2.4 GHz
+      min: 2300
+      max: 2500
+    - name: 5.8 GHz
+      min: 5000
+      max: 6000
+
+# Política de splits: por iteración, nunca por fila.
+splits:
+  policy: group_by_iteration
+  # Iteraciones con GT para train/validación.
+  dev_split: test
+  # Datasets sin GT, solo inferencia.
+  holdout_split: eval
+  # Un fold por iteración: validar con una, entrenar con el resto.
+  leave_one_iteration_out: true
+  random_state: 42
+
+# Parámetros del tracker Kalman.
+tracker:
+  # Ventana temporal para asociar detecciones, en segundos.
+  gate_time_s: 0.5
+  # Distancia máxima de asociación, en metros.
+  gate_distance_m: 150.0
+  # Umbral chi-cuadrado del gating.
+  gate_chi2: 16.27
+  # Detecciones seguidas para confirmar un track.
+  hits_to_confirm: 3
+  # Tiempo máximo en coast sin medida, en segundos.
+  max_coast_s: 5.0
+  # Ruido de proceso, en m/s².
+  process_noise_mps2: 2.0
+  # Ruido mínimo de medida, en metros.
+  measurement_noise_floor_m: 1.0
+
+# Pesos y umbrales para clasificar por voto de sensores.
+classification:
+  sensor_weights:
+    cyber: 1.5
+    rf: 1.2
+    radar: 1.0
+    camera: 0.9
+    acoustic: 0.7
+    fusion: 0.8
+    other: 0.8
+  # Peso mínimo total para aceptar una clase; si no, Unknown.
+  min_total_weight: 0.5
+  # Tiempo mínimo para cambiar de clase.
+  hysteresis_s: 5.0
+
+# Formato del Excel de entrega.
+submission:
+  # Rejilla fija de 100 ms según README_SubmissionTemplate.pdf §1.1.
+  grid_ms: 100
+  # Valor cuando no se sabe.
+  empty_value: Unknown
+  # Valor cuando no aplica.
+  not_applicable: Not applicable

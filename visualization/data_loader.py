@@ -2,9 +2,8 @@
 Carga y normalización de los CSV de sensores (Delta_*) y de las trazas GNSS
 de los drones (DroneTag_*).
 
-Todo se lleva a un sistema local ENU (Este, Norte, Arriba) en metros, con
-origen en el centro de la zona de operación, para que el gráfico 3D tenga
-proporciones reales.
+Existe porque el visor 3D necesita ENU y rayos de marcación; por eso normaliza
+todo a un sistema local ENU en metros con origen en la zona de operación.
 """
 from __future__ import annotations
 
@@ -223,6 +222,7 @@ def _estimate_z_offset(sensor: Sensor, drones: dict, max_dist=25.0, max_dt=1.0, 
 
 
 def build_dataset(sensors: list[Sensor], drones: list[Drone]) -> Dataset:
+    """Construye el `Dataset` del visor a partir de sensores y drones."""
     if not sensors and not drones:
         now = pd.Timestamp.utcnow().floor("s")
         return Dataset(sensors={}, drones={}, proj=Projection(0.0, 0.0),
@@ -278,6 +278,7 @@ def build_dataset(sensors: list[Sensor], drones: list[Drone]) -> Dataset:
 
 
 def load_dataset(data_dir: str) -> Dataset:
+    """Carga una carpeta plana de CSV de sensores y Dronetag para el visor."""
     all_csvs = sorted(glob.glob(os.path.join(data_dir, "*.csv"))) if os.path.isdir(data_dir) else []
     drone_files = [f for f in all_csvs if os.path.basename(f).startswith("DroneTag_")]
     sensor_files = [f for f in all_csvs if not os.path.basename(f).startswith("DroneTag_")]
