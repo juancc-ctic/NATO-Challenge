@@ -2,6 +2,69 @@
 
 El ETL está en la raíz de este repo: `src/`, `config.yaml`, `requirements.txt`, `.venv`, `data/`, `reports/` y `out/`. El visor 3D está en `visualization/`.
 
+## Pipeline de extremo a extremo
+
+Diagrama de flujo interactivo y simplificado: desde los CSV originales hasta el Excel de entrega, con ETL, sistema ENU, prefiltro, asociación, tracker, postfiltro, clasificación, identificación, metadatos, evaluación y visor 3D. Los nodos enlazan a `src/`, `data/` y `visualization/`.
+
+```mermaid
+flowchart LR
+    subgraph DATOS["Datos y ETL"]
+        direction TB
+        RAW["Datos originales<br/>CSV · GT · amigos · plantillas"]
+        INV["Inventario<br/>Scenario/Iteration · split_group"]
+        NORM["Normalización<br/>tiempo · sensor · coords · clase · serial · metadatos"]
+        ENU["Sistema ENU<br/>origen = mediana de sensores<br/>WGS84 → ECEF → ENU"]
+        DEDUP["Dedup SHA1<br/>Parquet · origins.json"]
+        INT["Interim<br/>detections · GT · friends"]
+    end
+    subgraph TRACKING["Tracking"]
+        direction TB
+        SPL["Splits<br/>LOO por iteración"]
+        PRE["Prefiltro<br/>inválidos · 0,0 · fusion · saltos"]
+        ASO["Asociación<br/>gating · Húngaro · azimut"]
+        TRK["Tracker<br/>Kalman ENU · lifecycle"]
+        POST["Postfiltro<br/>plausibilidad · suavizado"]
+    end
+    subgraph ATRIBUTOS["Atributos"]
+        direction TB
+        CLS["Clasificación<br/>voto por track"]
+        IDN["Identificación<br/>serial vs amigos"]
+        MET["Metadatos<br/>modelo · protocolo · banda"]
+    end
+    subgraph ENTREGA["Evaluación y entrega"]
+        direction TB
+        EVA["Evaluación<br/>GOSPA · recalls"]
+        SUB["Submit<br/>ENU → WGS84 · NEU"]
+        XLS["Excel<br/>19 columnas · 100 ms · check"]
+    end
+    VIS["Visor 3D<br/>CSV planos"]
+
+    RAW --> INV --> NORM --> ENU --> DEDUP --> INT
+    INT --> SPL --> PRE --> ASO --> TRK --> POST
+    POST --> CLS --> IDN --> MET --> EVA --> SUB --> XLS
+    INT --> VIS
+    VIS -.-> TRK
+
+    click RAW "data/README.md" "Datos originales"
+    click INV "src/etl.py" "Inventario y ETL"
+    click NORM "src/etl.py" "Normalización"
+    click ENU "src/geo.py" "Sistema ENU"
+    click DEDUP "src/etl.py" "Deduplicación"
+    click INT "data/README.md" "Tablas interim"
+    click SPL "src/splits.py" "Splits"
+    click PRE "config.yaml" "Prefiltro"
+    click ASO "src/associate.py" "Asociación"
+    click TRK "src/tracker.py" "Tracker"
+    click POST "config.yaml" "Postfiltro"
+    click CLS "src/classify.py" "Clasificación"
+    click IDN "src/identify.py" "Identificación"
+    click MET "src/metadata.py" "Metadatos"
+    click EVA "src/evaluate.py" "Evaluación"
+    click SUB "src/submit.py" "Submit"
+    click XLS "out/" "Excel de entrega"
+    click VIS "visualization/README.md" "Visor 3D"
+```
+
 ## Datos
 
 Cada miembro debe copiar los datasets originales dentro del repo, no enlazarlos desde otra ruta del PC:
