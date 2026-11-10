@@ -205,6 +205,31 @@ INVENTORY_COLUMNS = [
     "n_serials",
 ]
 
+TRACK_COLUMNS = [
+    "split_group",
+    "ts_ms",
+    "track_id",
+    "n",
+    "e",
+    "u",
+    "C_nn",
+    "C_ne",
+    "C_nu",
+    "C_ee",
+    "C_eu",
+    "C_uu",
+    "status",
+    "hits",
+    "misses",
+    "age",
+    "last_update_ms",
+    "class_norm",
+    "serial_norm",
+    "classification",
+    "classification_confidence",
+    "identity",
+]
+
 TEMPLATE_COLUMNS = [
     "timestamp",
     "unix_timestamp",

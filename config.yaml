@@ -90,22 +90,87 @@ splits:
   leave_one_iteration_out: true
   random_state: 42
 
-# Parámetros del tracker Kalman.
+# Parámetros del tracker EKF.
 tracker:
-  # Ventana temporal para asociar detecciones, en segundos.
-  gate_time_s: 0.5
-  # Distancia máxima de asociación, en metros.
-  gate_distance_m: 150.0
-  # Umbral chi-cuadrado del gating.
-  gate_chi2: 16.27
-  # Detecciones seguidas para confirmar un track.
-  hits_to_confirm: 3
-  # Tiempo máximo en coast sin medida, en segundos.
-  max_coast_s: 5.0
-  # Ruido de proceso, en m/s².
-  process_noise_mps2: 2.0
-  # Ruido mínimo de medida, en metros.
-  measurement_noise_floor_m: 1.0
+  # Dimensión de posición del estado: 2 o 3.
+  state_dim: 3
+  # Usa altitud cuando la detección la trae.
+  use_altitude: true
+  # Emite también tracks tentative.
+  output_tentative: true
+  # Prefiltro de detecciones, paso previo al tracking.
+  prefilter:
+    # none | range
+    method: range
+    # Descarta ecos de posición más lejanos que este radio, en metros.
+    max_range_m: 5000.0
+    # Excluye nodos de fusión y sensores solo-test.
+    drop_fusion: true
+    # Excluye detecciones clasificadas como no-dron.
+    drop_non_drone: true
+    # Futuro: outliers por saltos de velocidad/aceleración, max_alt_m,
+    # min_det_conf y filtros por clase o sensor.
+  # Movimiento y ruido de proceso.
+  motion:
+    model: constant_velocity
+    # Aceleración eficaz del ruido de proceso, en m/s².
+    process_noise_mps2: 2.0
+    # Tope de dt para evitar Q desmedido en huecos largos, en s.
+    max_dt_s: 5.0
+  # Modelos de medida y ruido.
+  measurement:
+    use_elevation: false
+    # Incertidumbre angular por tipo si la detección no la trae, en grados.
+    sigma_az_deg:
+      rf: 5.0
+      acoustic: 10.0
+      camera: 1.0
+    # Sigma inicial de velocidad si el track nace sin ella, en m/s.
+    initial_velocity_sigma_mps: 50.0
+    # Sigma inicial de altitud si el track nace sin u, en m.
+    initial_altitude_sigma_m: 1000.0
+  # Gating: descarta asociaciones improbables antes del Húngaro.
+  gating:
+    method: chi2
+    # Nivel de confianza de la distribución χ².
+    confidence: 0.999
+    # Si no es null, sustituye al χ² calculado por grados de libertad.
+    chi2_gate: 100.0
+    # Distancia máxima de asociación para medidas de posición, en metros.
+    gate_distance_m: 300.0
+  # Asociación uno-a-uno.
+  association:
+    method: hungarian
+    cost_class_weight: 2.0
+    cost_serial_weight: 1.0
+    invalid_cost: 1.0e12
+  # Ciclo de vida de tracks.
+  lifecycle:
+    hits_to_confirm: 3
+    max_coast_s: 5.0
+    max_tentative_misses: 3
+    merge_distance_m: 100.0
+    # Si es true, solo inicia tracks con clase de dron; más preciso, menos recall.
+    initiate_from_drone_only: false
+    # Sensores distintos que deben coincidir para iniciar un track desconocido.
+    initiation_min_sensors: 2
+    # Radio de coincidencia multisensor para iniciar, en metros.
+    initiation_distance_m: 100.0
+  # Postfiltro opcional de los tracks finales.
+  postfilter:
+    # none | fill_gaps | moving_average | plausibility
+    method: none
+    # Ventana del suavizado, en número de muestras.
+    smooth_window: 5
+    # Hueco máximo que se rellena por interpolación, en ms.
+    max_gap_ms: 1000
+    # Velocidad máxima plausible; descarta el track si la supera, en m/s.
+    max_speed_mps: 90.0
+  # Prefiltro/diagnóstico geométrico; no altera el baseline si está desactivado.
+  geometry:
+    enabled: false
+    selection: greedy_logdet
+    rank_tolerance: 1.0e-9
 
 # Pesos y umbrales para clasificar por voto de sensores.
 classification:
@@ -121,6 +186,15 @@ classification:
   min_total_weight: 0.5
   # Tiempo mínimo para cambiar de clase.
   hysteresis_s: 5.0
+
+# Métricas de evaluación de tracking.
+evaluation:
+  # Distancia de corte de GOSPA, en metros.
+  gospa_c_m: 100.0
+  # Exponente de GOSPA.
+  gospa_p: 2.0
+  # Distancia máxima para considerar un track emparejado, en metros.
+  match_distance_m: 50.0
 
 # Formato del Excel de entrega.
 submission:
