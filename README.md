@@ -223,7 +223,7 @@ $$
 
 ### Modelos de medida: $H$ (matriz de observación) y $R$ (ruido de las medidas)
 
-Para sensores de posición (`radar`, `cyber`, `fusion`, `other`) la medida ya es la posición:
+Para sensores de posición (`radar`, `cyber`, `fusion`, `other`) (i.e. que reportan directamente la posición del dron, `n/e/u`) la medida ya es la posición:
 
 $$
 z = [n, e, u]^\top, \qquad
@@ -233,7 +233,7 @@ $$
 
 Si falta `u`, se usa la variante 2D: `H` es $2\times6$ y `R` es $2\times2$.
 
-Para sensores solo-azimut (`rf`, `acústico`, `cámara`):
+Para sensores solo-azimut (`rf`, `acústico`, `cámara`) (i.e. que reportan la dirección (azimut, a veces elevación) y la posición del sensor, pero no la distancia al dron):
 
 $$
 h(x) = \operatorname{atan2}(e - e_s, n - n_s)
