@@ -4,7 +4,7 @@ Generada por `python -m src.cli all` desde `/opt/NATO-Challenge/`. Los CSV origi
 
 ## Cómo se crea
 
-`python -m src.cli all` recorre los CSV de test y evaluación, normaliza cada sensor a un **esquema común**, calcula ENU local por iteración, deduplica, escribe las tablas Parquet y genera los splits sin fuga. El detalle de cada tratamiento está en la [tabla de tratamientos](#tabla-de-tratamientos).
+`python -m src.cli all` recorre los CSV de test y evaluación, normaliza cada sensor a un **esquema común**, calcula ENU local por iteración, deduplica, escribe las tablas Parquet, genera los splits sin fuga, prefiltra las detecciones, ejecuta el tracker EKF y calcula las métricas de tracking. El detalle de cada tratamiento está en la [tabla de tratamientos](#tabla-de-tratamientos).
 
 El ETL es determinista y puede reejecutarse sobre datos de test no vistos (unidades, esquema común, ENU por iteración con el origen de esa misma iteración —guardado en `origins.json` y reutilizado al invertir—, seriales y clases, mapeando categorías desconocidas a `Unknown`), pero cualquier preprocesamiento aprendido (escaladores, imputación, calibración o umbrales) debe ajustarse solo con train y reutilizarse congelado (`transform`/`inverse_transform`, nunca `fit_transform` sobre test), validando el pipeline contra `eval` como pseudo-no-visto antes de confiar en él.
 
@@ -36,6 +36,9 @@ Orden: `discover_iterations` → `build_*` (detecciones, ground truth y amigos) 
 | Filtros | Aplica `keep_non_drone`, copia CSV opcional y compresión, para conservar lo útil sin inflar el interim | CSV/Parquet |
 | Splits | Asigna `test` → dev y `eval` → holdout y hace LOO por iteración, para validar en vuelos no vistos y evitar fuga de información | `splits.json`, `split_*.csv` |
 | Check | Valida la cabecera de 19 columnas y copia los timestamps de la plantilla, para garantizar que el Excel de entrega respeta el formato oficial | `check.json`, `reports/check/*.xlsx` |
+| Prefiltro | Limpia detecciones inválidas, excluye fusión/no-dron y descarta ecos de posición fuera de `max_range_m` | `reports/tracks.parquet` |
+| Tracking | Predice con EKF, descarta asociaciones con χ², asigna con Húngaro, actualiza y aplica ciclo de vida; remuestrea a 100 ms | `reports/tracks.parquet` |
+| Evaluación | Calcula GOSPA, RMSE, recall, tracks falsos e ID switches contra GT por iteración | `reports/tracking_metrics.csv` |
 
 ### Dónde mirar cada cosa
 
@@ -50,11 +53,13 @@ Orden: `discover_iterations` → `build_*` (detecciones, ground truth y amigos) 
 | ¿Qué folds hay y sin fuga? | `data/interim/splits.json`, `reports/split_manifest.csv`, `reports/split_folds.csv` |
 | ¿Las plantillas Excel están bien? | `reports/check.json`, `reports/check/*.xlsx` |
 | ¿Dónde están los datos normalizados? | `data/interim/*.parquet`, `data/interim/{test,eval}/*.parquet` |
+| ¿Dónde están los tracks y sus métricas? | `reports/tracks.parquet`, `reports/tracking_metrics.csv` |
 
 ## Consideraciones en la creación de la BBDD interna
 
-- **`fusion` (`LJJX`)**: solo existe en test y duplica tracks entre `Charlie_LJJX` y `Delta_LJJX`. Para eval hay que excluirlo o deduplicarlo; para train, decidir si se usa.
-- **Filas cyber sin `alt_m`**: ya tienen `n`/`e` en 2D y `u=NaN`; el tracker debe aceptar 2D.
+- **`fusion` (`LJJX`)**: solo existe en test y duplica tracks entre `Charlie_LJJX` y `Delta_LJJX`. El tracker lo excluye siempre (`is_test_only`), también en test.
+- **Filas cyber sin `alt_m`**: 87 filas en `eval:Dataset_II:S2:I1`; tienen `n`/`e` en 2D y `u=NaN`. El tracker las actualiza en 2D y propaga `u` con covarianza grande.
+- **`sigma_az`**: no existe en la BD. El tracker usa `tracker.measurement.sigma_az_deg` por tipo (`rf`, `acústico`, `cámara`) y lo calibra con residuos de validación.
 - **Filas con sensor `0,0`**: marcadas `has_sensor_location=False` y excluidas del origen/triangulación.
 - **`sensor_lat/lon` variables** en algunos sensores: documentado; no asumir constante, usar `has_sensor_location`.
 - **`serial` inferido de `objectInfo`/`id`**: conviene revisar falsos positivos/negativos antes de identificación.
@@ -189,4 +194,6 @@ Una fila por segundo y dron. `drone_key` no está en detecciones: está aquí y 
 | `reports/etl_issues.csv` | incidencias por fila |
 | `reports/null_counts.csv` | nulos por tabla y columna |
 | `reports/check.json`, `reports/check/*.xlsx` | validación de plantillas Excel |
+| `reports/tracks.parquet` | tracks estimados por el tracker EKF |
+| `reports/tracking_metrics.csv` | GOSPA, RMSE, recall, tracks falsos e ID switches por iteración |
 | `out/` | solo Excel de entrega |

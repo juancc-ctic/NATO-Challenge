@@ -89,13 +89,9 @@ ENU es una aproximación tangente local: es válida para el escenario (unos poco
 
 Rangos: ENU mueve el ground truth en `n/e ≈ ±4 km` y `u ≈ 0–460 m`; los ecos a `±100–200 km` son outliers. En WGS84 el vuelo está en `lat ≈ 51,51°`, `lon ≈ 5,84°` (`1 m ≈ 9·10⁻⁶°` lat, `1,4·10⁻⁵°` lon). ECEF también usa metros, pero con valores de millones.
 
-<img src="docs/figures/ecef_enu.png" alt="ECEF y ENU" width="520">
-
-*Figura 1. ECEF (X, Y, Z) y ejes locales ENU. Fuente: [Mike1024, dominio público, Wikimedia Commons](https://commons.wikimedia.org/wiki/File:ECEF_ENU_Longitude_Latitude_relationships.svg).*
-
 <img src="docs/figures/ecef_enu_right_hand.png" alt="ECEF y ejes locales" width="520">
 
-*Figura 2. ECEF y ejes locales Norte/Este/Arriba. Fuente: [Kkddkkdd, CC BY-SA 4.0, Wikimedia Commons](https://commons.wikimedia.org/wiki/File:ECEF_ENU_Longitude_Latitude_right-hand-rule.svg).*
+*Figura 1. ECEF y ejes locales Norte/Este/Arriba. Fuente: [Kkddkkdd, CC BY-SA 4.0, Wikimedia Commons](https://commons.wikimedia.org/wiki/File:ECEF_ENU_Longitude_Latitude_right-hand-rule.svg).*
 
 NEU es el mismo esquema que ENU cambiando el orden de los ejes: `N-E-U` en vez de `E-N-U`.
 
@@ -138,6 +134,8 @@ python -m src.cli inventory # reports/inventory.csv y resumen
 python -m src.cli etl       # data/interim/*
 python -m src.cli splits    # folds sin fuga (leave-one-iteration-out: cada fold valida con una iteración completa y entrena con las demás, sin compartir vuelo)
 python -m src.cli check     # valida plantillas Excel
+python -m src.cli track     # tracks EKF en reports/tracks.parquet
+python -m src.cli evaluate  # métricas de tracking en reports/
 ```
 
 Para reconstruir desde cero:
@@ -153,6 +151,264 @@ Detalle del ETL, esquema común, columnas, tablas, calidad y limitaciones: [`dat
 
 Salidas: `data/interim/` (tablas Parquet), `reports/` (auditoría y métricas) y `out/` (Excel de entrega).
 
+## Tracking
+
+El baseline está implementado en `src/prefilter.py` (prefiltro), `src/motion.py` ($F$ y $Q$), `src/geometry.py` (modelos de medida e información), `src/associate.py` (gating y asignación), `src/tracker.py` (EKF y ciclo de vida), `src/postfilter.py` (postfiltro opcional) y `src/resample.py` (remuestreo). El flujo es:
+
+```mermaid
+flowchart LR
+    PR["prefiltro"]
+    subgraph CORE["Tracking (núcleo)"]
+        direction LR
+        P["predicción"] --> G["gating"] --> A["asociación"] --> U["actualización"] --> L["ciclo de vida"]
+    end
+    PR --> P
+    L --> R["remuestreo"] --> F["postfiltro"]
+    GEO["geometría/observabilidad (J)"] -.-> PR
+    GEO -.-> G
+    GEO -.-> U
+```
+
+El prefiltro es un paso previo al tracking: limpia y descarta detecciones no plausibles. El núcleo del tracking son los pasos del recuadro: predicción, gating, asociación, actualización y ciclo de vida. El remuestreo y el postfiltro son adiciones que se mantienen en el diagrama: primero se remuestrea a la rejilla de salida y después se aplica el postfiltro sobre ella. El RTS futuro iría antes del remuestreo, porque necesita el estado y las covarianzas internas. El ciclo de vida entra en el núcleo porque decide qué tracks existen, se confirman o se eliminan; sin él no hay tracking multiobjeto, solo estimación aislada. La geometría/observabilidad no es un paso secuencial: es una capa transversal que alimenta el prefiltro (selección de sensores), el gating (criterio geométrico) y la actualización (diagnóstico de observabilidad).
+
+El estado es 3D y de velocidad constante:
+
+$$
+x_k = [n, e, u, v_n, v_e, v_u]^\top
+$$
+
+### Prefiltro
+
+Está en `src/prefilter.py` y se ejecuta antes de la predicción. Su función genérica `preprocess_detections` delega en un método concreto (`range` o `none`).
+
+La limpieza común elimina nodos de fusión (`fusion`, solo test), detecciones no-dron y medidas sin posición ni azimut utilizables. El método `range` descarta ecos de posición fuera del radio del escenario:
+
+$$
+r_k = \sqrt{n_k^2 + e_k^2} \leq r_{\max}
+$$
+
+donde $r_{\max}$ es `tracker.prefilter.max_range_m`. Las medidas solo-azimut no se filtran por rango porque no tienen posición.
+
+El prefiltro podría ampliarse con outliers de saltos de velocidad o aceleración, altura máxima, confianza mínima de detección y filtros por clase o sensor. Es un paso de limpieza de datos, no de estimación: no usa `F`, `Q`, `H` ni `R`.
+
+### Movimiento: $F$ (modelo de movimiento) y $Q$ (ruido del proceso)
+
+`src/motion.py` construye `F` y `Q`. `F` sale de la física de velocidad constante: la posición avanza con la velocidad y la velocidad se mantiene. `Q` modela que la velocidad no es perfectamente constante: se añade una aceleración eficaz $q$ (m/s²) con el bloque de ruido blanco.
+
+`F` es la forma matricial de la dinámica de velocidad constante: la posición se actualiza como $p_k = p_{k-1} + v_{k-1}\,\Delta t$ y la velocidad se mantiene como $v_k = v_{k-1}$.
+
+La derivación es la del modelo de **aceleración blanca discreta** (DWNA). Si en cada paso la aceleración es una variable aleatoria de media cero y varianza $q^2$, entonces el incremento de velocidad es $\Delta v = a\,\Delta t$ y el de posición es $\Delta p = a\,\Delta t^2/2$. Por tanto (por la definición de varianza y la bilinealidad de la covarianza: si $\mathbb{E}[a]=0$, entonces $\mathbb{E}[a^2]=\operatorname{Var}(a)$ y $\operatorname{Cov}(\alpha a,\beta a)=\alpha\beta\operatorname{Var}(a)$):
+
+$$
+\mathbb{E}[\Delta p^2] = q^2\frac{\Delta t^4}{4},
+\qquad
+\mathbb{E}[\Delta p\,\Delta v] = q^2\frac{\Delta t^3}{2},
+\qquad
+\mathbb{E}[\Delta v^2] = q^2\Delta t^2
+$$
+
+El modelo continuo equivalente (CWNA) usaría $\Delta t^3/3$, $\Delta t^2/2$ y $\Delta t$; aquí se usa el discreto porque el tracker avanza entre detecciones.
+
+$$
+F = \begin{bmatrix} I_3 & \Delta t I_3 \\ 0_3 & I_3 \end{bmatrix},
+\qquad
+Q = q^2 \begin{bmatrix} \frac{\Delta t^4}{4}I_3 & \frac{\Delta t^3}{2}I_3 \\ \frac{\Delta t^3}{2}I_3 & \Delta t^2 I_3 \end{bmatrix}
+$$
+
+La predicción es:
+
+$$
+x^- = F x^+, \qquad P^- = F P^+ F^\top + Q
+$$
+
+### Modelos de medida: $H$ (matriz de observación) y $R$ (ruido de las medidas)
+
+Para sensores de posición (`radar`, `cyber`, `fusion`, `other`) la medida ya es la posición:
+
+$$
+z = [n, e, u]^\top, \qquad
+H = [I_3 \mid 0_3], \qquad
+R = \operatorname{diag}(\sigma_n^2, \sigma_e^2, \sigma_u^2)
+$$
+
+Si falta `u`, se usa la variante 2D: `H` es $2\times6$ y `R` es $2\times2$.
+
+Para sensores solo-azimut (`rf`, `acústico`, `cámara`):
+
+$$
+h(x) = \operatorname{atan2}(e - e_s, n - n_s)
+$$
+
+$$
+H = \left[-\frac{\Delta e}{r^2}, \frac{\Delta n}{r^2}, 0, 0, 0, 0\right],
+\qquad
+R = [\sigma_{az}^2]
+$$
+
+con $\Delta n = n - n_s$, $\Delta e = e - e_s$, $r^2 = \Delta n^2 + \Delta e^2$. La fila es perpendicular a la línea de visión: el azimut no da distancia.
+
+Estos sensores aportan azimut, a veces elevación, y la posición del sensor, pero no rango ni posición 3D del dron. Para tratarlos en 3D como el resto faltaría una distancia (o posición) que no está en los datos; por eso se usan como medidas 2D de rumbo que actualizan la dirección pero no la distancia, no inician tracks por sí solos y necesitan sensores de posición o movimiento (paralaje) para que la distancia sea observable, asumiendo que `σ_az` es un default calibrable y no una incertidumbre reportada.
+
+`σ_az` no existe en la BD. Se toma de `tracker.measurement.sigma_az_deg` por tipo (`rf: 5°`, `acústico: 10°`, `cámara: 1°`) y se calibra con residuos.
+
+### Gating: $S$ (covarianza de la innovación) y $d^2$ (distancia de Mahalanobis)
+
+Antes del Húngaro se descartan asociaciones improbables con la distancia de Mahalanobis:
+
+$$
+r = z - H x^-, \qquad
+S = H P^- H^\top + R, \qquad
+d^2 = r^\top S^{-1} r
+$$
+
+$$
+\text{válida si } d^2 \leq \chi^2_{m,\alpha}
+$$
+
+donde $m$ es la dimensión de la medida y $\alpha$ el nivel de confianza (`tracker.gating.confidence`). Si `tracker.gating.chi2_gate` no es `null`, se usa ese umbral fijo en lugar del calculado. Además se aplica una puerta física de distancia para medidas de posición.
+
+### Asociación: $C$ (matriz de coste)
+
+El coste combina Mahalanobis con clase y serial:
+
+$$
+C_{ij} = d^2_{ij} + w_c \mathbb{1}[c_i \neq c_j] + w_s \mathbb{1}[s_i \neq s_j]
+$$
+
+$$
+\min \sum_{ij} C_{ij} a_{ij}
+\quad \text{s.a.} \quad
+\sum_j a_{ij} \leq 1, \quad
+\sum_i a_{ij} \leq 1, \quad
+a_{ij} \in \{0,1\}
+$$
+
+Se resuelve con Húngaro (`scipy.optimize.linear_sum_assignment`) por sensor y por instante. Las asociaciones inválidas se excluyen con un coste grande.
+
+### Actualización EKF: $K$ (ganancia de Kalman) y $P$ (covarianza del estado)
+
+$$
+K = P^- H^\top S^{-1}
+$$
+
+$$
+x^+ = x^- + K r, \qquad
+P^+ = (I - K H) P^- (I - K H)^\top + K R K^\top
+$$
+
+Se usa la forma de Joseph para mantener $P$ simétrica y definida positiva.
+
+### Ciclo de vida
+
+- `tentative`: track nuevo; pasa a `confirmed` al acumular `hits_to_confirm`.
+- `confirmed`: se actualiza con detección; si no hay detección pasa a `coast`.
+- `coast`: solo predice; se elimina si supera `max_coast_s`.
+- Detección sin asignar con posición y coincidencia multisensor (`initiation_min_sensors`): crea un `tentative`.
+- Si `initiate_from_drone_only` está activo, solo inicia con clase de dron.
+- Tracks duplicados dentro de `merge_distance_m` se fusionan.
+
+### Postfiltro
+
+Es opcional y está en `src/postfilter.py`; se aplica después del remuestreo, sobre la rejilla de salida, y por defecto `tracker.postfilter.method: none`, así que no altera el baseline. Métodos disponibles:
+
+- `fill_gaps`: reindexa cada track en la rejilla y interpola linealmente huecos de hasta `max_gap_ms`; la covarianza se arrastra.
+- `moving_average`: suaviza `n,e,u` con media móvil centrada de ventana `smooth_window`:
+  $$
+  \bar{x}_k = \frac{1}{W}\sum_{i=-w}^{w} x_{k+i}
+  $$
+- `plausibility`: elimina el track si la velocidad entre muestras consecutivas supera `max_speed_mps`:
+  $$
+  v_k = \frac{\lVert p_k - p_{k-1}\rVert}{\Delta t} > v_{\max}
+  $$
+
+El relleno de huecos no sustituye al remuestreo: el remuestreo predice con `F`, mientras que `fill_gaps` interpola observaciones. El suavizado y el filtro de plausibilidad son opcionales porque pueden sesgar o eliminar tracks reales; se activan solo tras validarlos en test. Una mejora futura es un suavizado RTS sobre el estado completo, que necesita guardar velocidad y covarianzas de predicción.
+
+### Geometría y observabilidad: $J$ (matriz de información)
+
+La información total de una ventana es:
+
+$$
+J = \sum_i H_i^\top R_i^{-1} H_i
+$$
+
+Sus autovalores dicen si la posición es observable:
+
+- rango completo: se pueden estimar las tres direcciones;
+- rango bajo: falta una dirección;
+- $\kappa = \lambda_{\max}/\lambda_{\min}$: estabilidad numérica;
+- ganancia marginal $\log\det(J + J_i) - \log\det(J)$: redundancia del sensor.
+
+Es una capa transversal, no un paso secuencial: puede usarse como **prefiltro** de sensores antes del tracker, como criterio geométrico complementario en **gating** y como diagnóstico de la **actualización**. `src/geometry.py` implementa `diagnose_information` (diagnóstico) y `select_sensors` (prefiltro/diagnóstico: elige sensores antes del tracker maximizando `logdet`). El baseline no selecciona sensores: usa todos los válidos. La selección queda desactivada con `tracker.geometry.enabled`.
+
+### Remuestreo
+
+El tracker actualiza los tracks en los timestamps irregulares de las detecciones, pero la entrega exige una rejilla fija (`submission.grid_ms`, 100 ms). `src/resample.py` implementa `resample_tracks`, que lleva cada track a esa rejilla prediciendo con `F` y `Q` desde su última instantánea; se ejecuta antes del postfiltro:
+
+$$
+x(t) = F(\Delta t)\,x_k,
+\qquad
+P(t) = F(\Delta t)\,P_k\,F(\Delta t)^\top + Q(\Delta t)
+$$
+
+No hay corrección con medidas: es una predicción/coast sobre la rejilla. Tampoco interpola detecciones (eso sería `fill_gaps` del postfiltro). Así se obtiene posición y covarianza en cada timestamp de entrega.
+
+### Evaluación
+
+GOSPA mide a la vez localización y cardinalidad. Sus componentes son: el error de localización de los pares emparejados ($d_i^p$), la penalización por objetivos del GT no detectados y la penalización por tracks falsos; $c$ trunca la distancia y $p$ controla la sensibilidad.
+
+$$
+\mathrm{GOSPA} = \left[
+\sum_{\text{emparejados}} d_i^p
++ \frac{c^p}{p}(|X| - |\pi|)
++ \frac{c^p}{p}(|Y| - |\pi|)
+\right]^{1/p}
+$$
+
+Para calcularlo, en cada iteración y timestamp se interpola el GT y se vuelve a emparejar tracks con GT mediante un Húngaro de evaluación. No es el Húngaro del tracker: aquel asocia detecciones a tracks con coste Mahalanobis/clase/serial; este asocia tracks ya estimados con GT usando distancia euclídea y trunca a $c$ (los pares a más de $c$ no cuentan como emparejados). Se suman las distancias de los pares válidos y $c^p/p$ por cada GT y cada track no emparejados, y se eleva a $1/p$. Después se promedian timestamps e iteraciones. Del mismo emparejamiento salen RMSE, recall (pares/GT) y tracks falsos (tracks no emparejados/tracks); los ID switches se cuentan por dron al cambiar de track. Se usa $p=2$ y $c$ en `evaluation.gospa_c_m`.
+
+El challenge solo indica que usa GOSPA, sin fijar $p$, $c$, $\alpha$ ni el emparejamiento. Aquí se sigue la definición estándar de Rahmathullah et al. (2017) con $p=2$, $c$ configurable y asignación óptima; por eso los valores absolutos dependen de $c$ y solo son comparables entre modelos evaluados con el mismo $c$.
+
+### Limitaciones
+
+- `fusion` se excluye siempre del tracker (`is_test_only`).
+- 87 filas `cyber` de `eval:Dataset_II:S2:I1` no traen `u`; se actualizan en 2D y `u` se propaga con covarianza grande.
+- `σ_az` es un default por tipo, no una medida del sensor; hay que calibrarlo.
+- El baseline no modela sesgo de sensor ni correlación entre sensores.
+
+### Decisiones y notas
+
+- Estado 3D y salida de tracks `tentative` y `confirmed`; `coast` también se emite mientras viva.
+- Prefiltro: limpieza común de fusión/no-dron/medidas inválidas y, con `prefilter.method: range`, descarte de ecos de posición a más de `prefilter.max_range_m` (5 km) del origen ENU.
+- Inicio de tracks desconocidos: exige coincidencia de al menos `initiation_min_sensors` (2) sensores en `initiation_distance_m` (100 m); los tracks con clase de dron pueden iniciarse con uno.
+- `σ_az` es un default por tipo, no una medida del sensor; se calibra con residuos.
+- La selección geométrica de sensores está implementada pero desactivada (`geometry.enabled: false`); el baseline usa todos los sensores válidos.
+- `chi2_gate: 100` es una puerta permisiva inicial (≈10σ) para no perder detecciones reales; se ajustará con validación.
+
+### Referencias
+
+- Kalman, R. E. (1960). A New Approach to Linear Filtering and Prediction Problems. *Journal of Basic Engineering*, 82(1), 35–45.
+- Rahmathullah, A. S., García-Fernández, Á. F., & Svensson, L. (2017). Generalized Optimal Sub-Pattern Assignment Metric. *20th International Conference on Information Fusion (FUSION)*, 1–8.
+- Bar-Shalom, Y., Li, X.-R., & Kirubarajan, T. (2001). *Estimation with Applications to Tracking and Navigation*. Wiley. Cap. 6: modelo de velocidad constante y ruido de proceso DWNA.
+- Blackman, S. S., & Popoli, R. (1999). *Design and Analysis of Modern Tracking Systems*. Artech House. Cap. 6: filtros y asociación.
+- Särkkä, S. (2013). *Bayesian Filtering and Smoothing*. Cambridge University Press. Cap. 4: discretización del modelo CV; cap. 9: suavizado RTS.
+- ResearchGate. *Single-target state estimation using Kalman filter and RTS smoother*. https://www.researchgate.net/figure/Single-target-state-estimation-using-Kalman-filter-and-RTS-smoother_fig4_320182941
+
+### Resultados del baseline
+
+Primera pasada en `test:S1:I1` (sin ajuste fino): GOSPA ≈ 142 m, RMSE ≈ 53 m, recall ≈ 0.30, tracks falsos ≈ 0.44 e ID switches ≈ 155. Sirve como referencia; el ajuste de `q`, `σ_az`, puertas y ciclo de vida queda pendiente.
+
+## Clasificación
+
+...
+
+## Identificación
+
+...
+
+## Metadatos
+
+...
+
 ## Train / validación
 
 - `test` = 6 iteraciones con ground truth → entrenamiento/validación supervisada.
@@ -164,6 +420,17 @@ Por qué: las filas de una misma iteración comparten vuelo, sensores y tiempo. 
 - Ajustar escaladores, calibración y umbrales solo con folds de train; congelar antes de `eval`.
 - `fusion` (`LJJX`) es solo de test: excluirlo o marcarlo con `is_fusion_node` / `is_test_only` para evaluación.
 - La lista de amigos solo sirve para identidad en inferencia.
+
+No hay umbrales mínimos para las métricas que debamos superar, pero los siguientes son valores típicamente razonables.
+
+| Área | Métrica oficial | Peso | Rango típico | Objetivo interno | Baseline actual |
+|---|---|---:|---|---|---|
+| Tracking | GOSPA ($c=100$ m, $p=2$) | 0.4 | 20–100 m | < 50 m | 142–190 m |
+| Clasificación | Recall | 0.2 | 0.60–0.90 | > 0.75 | pendiente |
+| Identificación | Recall | 0.1 | 0.50–0.90 | > 0.70 | pendiente |
+| Fusión | Acierto de metadatos | 0.3 | 0.50–0.80 | > 0.70 | pendiente |
+
+Los valores “típicos” son orientativos y dependen del dataset y del umbral de GOSPA. Los criterios internos se fijan con los folds de `test` y se congelan antes de `eval`.
 
 ## Visualización
 
@@ -181,10 +448,13 @@ Todos los parámetros están en `config.yaml`.
 
 ## TODO
 
-Hecho: Fases 0-2 de la guía (repo, inventario y ETL). Pendiente:
+Hecho: Fases 0-5 (repo, inventario, ETL, baseline de tracking y evaluador). Pendiente:
 
-- Valorar hacer la asociación y el tracker (Fases 3-4): decidir gating, húngaro y triangulación solo-azimut; montar Kalman con ciclo de vida; y elegir si empezar por un baseline solo-cyber para desbloquear el 60%.
-- Hacer el evaluador propio (Fase 5): calcular GOSPA, recall de clase/identidad y acierto de metadatos en `src/evaluate.py`.
+- Ampliar el tracker con UKF, CA/IMM, gating conforme y selección geométrica de sensores; el baseline actual es EKF de velocidad constante con Húngaro y ciclo de vida.
+- Añadir suavizado **RTS** antes del remuestreo, en `src/postfilter.py`/`src/tracker.py`: guardar velocidad y covarianzas de predicción para una pasada backward por track (forward-backward), y compararlo con `moving_average`.
+- Ampliar `src/prefilter.py` con outliers de saltos de velocidad/aceleración, altura máxima, confianza mínima y filtros por clase o sensor.
+- Conectar `det_conf` y `class_conf` al flujo: `det_conf` en prefiltro (`min_det_conf`), coste de asociación (`w_conf·(1-det_conf)`) o peso de `R`; `class_conf` en el voto de clasificación y en `classification_confidence`. Y comparar qué tal la evaluación con y sin ellos.
+- Calibrar `σ_az` y el ruido de proceso con folds de test; congelar antes de `eval`.
 - Resolver clasificación, identificación y metadatos (Fases 6-8): votar por track, decidir amigo/enemigo por serial y rellenar la ficha técnica (modelo, protocolo, banda).
 - Ajustar y calibrar (Fase 9): cambiar un parámetro a la vez, congelar `config.yaml` y fijar umbrales con FPR objetivo usando folds de test.
 - Dejar hecha la entrega (Fase 10): generar los 3 Excel de evaluación, escribir el PDF de metodología y montar la demo.
