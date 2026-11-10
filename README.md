@@ -233,6 +233,8 @@ $$
 
 Si falta `u`, se usa la variante 2D: `H` es $2\times6$ y `R` es $2\times2$.
 
+`z` es la posición medida por el sensor en ENU; `H` selecciona las componentes de posición del estado $[n,e,u,v_n,v_e,v_u]$; `R` es la covarianza del ruido de medida. Los $\sigma_n,\sigma_e,\sigma_u$ salen del ETL (`_sigma`): de `location_yError`, `location_xError` y `location_zError` si el sensor los reporta, o de `default_sigma_m` por tipo si no; cyber convierte de grados a metros y se aplican `sigma_floor_m` y `sigma_cap_m`. Si no hay `u`, se usa la variante 2D.
+
 Para sensores solo-azimut (`rf`, `acústico`, `cámara`) (i.e. que reportan la dirección (azimut, a veces elevación) y la posición del sensor, pero no la distancia al dron):
 
 $$
@@ -248,6 +250,8 @@ $$
 con $\Delta n = n - n_s$, $\Delta e = e - e_s$, $r^2 = \Delta n^2 + \Delta e^2$. La fila es perpendicular a la línea de visión: el azimut no da distancia.
 
 Estos sensores aportan azimut, a veces elevación, y la posición del sensor, pero no rango ni posición 3D del dron. Para tratarlos en 3D como el resto faltaría una distancia (o posición) que no está en los datos; por eso se usan como medidas 2D de rumbo que actualizan la dirección pero no la distancia, no inician tracks por sí solos y necesitan sensores de posición o movimiento (paralaje) para que la distancia sea observable, asumiendo que `σ_az` es un default calibrable y no una incertidumbre reportada.
+
+**Nota importante:** en el código actual, los sensores solo-azimut no crean tracks por sí solos porque `_can_initiate` exige `has_position`; `rf`, `acústico` y `cámara` solo actualizan tracks ya creados por sensores de posición. La iniciación por triangulación/paralaje queda pendiente en el TODO.
 
 `σ_az` no existe en la BD. Se toma de `tracker.measurement.sigma_az_deg` por tipo (`rf: 5°`, `acústico: 10°`, `cámara: 1°`) y se calibra con residuos.
 
@@ -450,6 +454,7 @@ Todos los parámetros están en `config.yaml`.
 
 Hecho: Fases 0-5 (repo, inventario, ETL, baseline de tracking y evaluador). Pendiente:
 
+- **IMPORTANTE**: los sensores solo-azimut (`rf`, `acústico`, `cámara`) no inician tracks en el baseline; solo actualizan tracks nacidos de sensores de posición. Falta iniciación por triangulación/paralaje con varios sensores solo-azimut y validar si merece la pena.
 - Ampliar el tracker con UKF, CA/IMM, gating conforme y selección geométrica de sensores; el baseline actual es EKF de velocidad constante con Húngaro y ciclo de vida.
 - Añadir suavizado **RTS** antes del remuestreo, en `src/postfilter.py`/`src/tracker.py`: guardar velocidad y covarianzas de predicción para una pasada backward por track (forward-backward), y compararlo con `moving_average`.
 - Ampliar `src/prefilter.py` con outliers de saltos de velocidad/aceleración, altura máxima, confianza mínima y filtros por clase o sensor.
