@@ -5,6 +5,9 @@ centrada en cada state vector, y rellena la plantilla sin tocar los timestamps.
 """
 from __future__ import annotations
 
+import json
+import re
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +29,50 @@ _DEFAULTS: dict[str, Any] = {
     "serial_number": "Unknown",
     "signal_frequency_band": "Unknown",
 }
+_ALIASES: dict[str, tuple[str, ...]] = {
+    "classification": ("class_norm",),
+    "serial_number": ("serial_norm",),
+}
+_ALLOWED_SERIALS = (
+    "F45TB21BR1AE03FP",
+    "163DG1700154R3",
+    "F5FHD233M00DEYG6",
+    "1ZNBJAB00C00MQ",
+    "1748FEV2HL7824051124",
+    "Unknown",
+    "Not Applicable",
+)
+
+
+def _serial_value(value: Any) -> str:
+    """Ajusta el serial a los valores admitidos por la plantilla."""
+    text = str(value).strip()
+    if text in _ALLOWED_SERIALS:
+        return text
+    for allowed in _ALLOWED_SERIALS:
+        if allowed in text:
+            return allowed
+    return "Unknown"
+
+
+def _value(track: pd.Series, column: str) -> Any:
+    """Devuelve el valor de una columna de track, con alias y default."""
+    candidates = (column, *_ALIASES.get(column, ()))
+    for name in candidates:
+        if name not in track:
+            continue
+        value = track.get(name)
+        if value is None:
+            continue
+        try:
+            if pd.isna(value):
+                continue
+        except (TypeError, ValueError):
+            pass
+        if column == "serial_number":
+            return _serial_value(value)
+        return value
+    return _DEFAULTS.get(column)
 
 
 def _cell(value: Any) -> Any:
@@ -105,11 +152,16 @@ def tracks_to_submission(
             "C_ee": float(cov_out[1, 1]),
             "C_eu": float(cov_out[1, 2]),
             "C_uu": float(cov_out[2, 2]),
-            "track_id": str(track["track_id"]),
+            "track_id": str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"{group}:{track['track_id']}",
+                )
+            ),
         }
         for column in _VALUE_COLUMNS:
             if column not in row:
-                row[column] = track.get(column, _DEFAULTS.get(column))
+                row[column] = _value(track, column)
         rows.append(row)
 
     return pd.DataFrame(rows, columns=["ts_ms", *_VALUE_COLUMNS])
@@ -143,7 +195,7 @@ def write_submission(tracks: pd.DataFrame, template: Path, output: Path) -> None
 
     output.parent.mkdir(parents=True, exist_ok=True)
     workbook = Workbook(write_only=True)
-    output_sheet = workbook.create_sheet()
+    output_sheet = workbook.create_sheet(title=sheet.title)
     output_sheet.append(list(TEMPLATE_COLUMNS))
 
     for row in rows:
@@ -166,3 +218,115 @@ def write_submission(tracks: pd.DataFrame, template: Path, output: Path) -> None
 
     workbook.save(output)
     source.close()
+
+
+def _safe_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_")
+
+
+_SIDECARS: dict[str, tuple[str, ...]] = {
+    "classification": ("classification", "classification_confidence"),
+    "identification": ("identity",),
+    "metadata": (
+        "uav_model/manufacturer",
+        "protocol",
+        "serial_number",
+        "signal_frequency_band",
+    ),
+}
+_SIDECAR_KEYS = ("split_group", "track_id")
+
+
+def _load_sidecar(
+    cfg: Any,
+    name: str,
+    columns: tuple[str, ...],
+) -> pd.DataFrame | None:
+    """Carga un sidecar opcional; devuelve `None` si no existe o está vacío."""
+    path = cfg.reports / f"{name}.parquet"
+    if not path.exists():
+        return None
+    frame = pd.read_parquet(path)
+    if frame.empty or not set(_SIDECAR_KEYS).issubset(frame.columns):
+        return None
+    keep = list(_SIDECAR_KEYS) + [column for column in columns if column in frame.columns]
+    return frame[keep].drop_duplicates(subset=list(_SIDECAR_KEYS), keep="last")
+
+
+def _merge_sidecars(
+    tracks: pd.DataFrame,
+    cfg: Any,
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Mezcla los sidecars disponibles y deja `Unknown` lo que no exista."""
+    merged = tracks.copy()
+    status: dict[str, str] = {}
+    for name, columns in _SIDECARS.items():
+        sidecar = _load_sidecar(cfg, name, columns)
+        if sidecar is None:
+            status[name] = "not_implemented"
+            continue
+        present = [column for column in columns if column in sidecar.columns]
+        status[name] = "used" if sidecar[present].notna().any().any() else "empty"
+        merged = merged.drop(columns=present, errors="ignore")
+        merged = merged.merge(
+            sidecar,
+            on=list(_SIDECAR_KEYS),
+            how="left",
+            validate="many_to_one",
+        )
+    return merged, status
+
+
+def run_submission(
+    tracks: pd.DataFrame,
+    cfg: Any,
+    split: str | None = None,
+) -> dict[str, Any]:
+    """Escribe un Excel de entrega por iteración a partir de los tracks reales."""
+    from src.etl import discover_iterations
+
+    origins_path = cfg.interim / "origins.json"
+    origins = json.loads(origins_path.read_text(encoding="utf-8"))
+    iterations = discover_iterations(cfg)
+    merged, stages = _merge_sidecars(tracks, cfg)
+    used_names: set[str] = set()
+    results: list[dict[str, Any]] = []
+    for iteration in iterations:
+        if split is not None and iteration.split != split:
+            continue
+        if iteration.template_file is None:
+            results.append(
+                {
+                    "split_group": iteration.split_group,
+                    "template": None,
+                    "output": None,
+                    "status": "missing_template",
+                }
+            )
+            continue
+        group = iteration.split_group
+        if group not in origins:
+            raise KeyError(f"No hay origen ENU para {group}")
+        subset = merged[merged["split_group"] == group] if not merged.empty else merged
+        submission = tracks_to_submission(subset, origins)
+        name = iteration.template_file.stem
+        if name in used_names:
+            name = f"{_safe_name(group)}_{name}"
+        used_names.add(name)
+        output = cfg.out / f"{name}.xlsx"
+        write_submission(submission, iteration.template_file, output)
+        results.append(
+            {
+                "split_group": group,
+                "template": str(iteration.template_file),
+                "output": str(output),
+                "status": "ok",
+                "rows": int(len(submission)),
+            }
+        )
+    return {
+        "n_iterations": len(results),
+        "n_written": sum(1 for item in results if item["status"] == "ok"),
+        "stages": stages,
+        "results": results,
+    }

@@ -17,6 +17,7 @@ from src.etl import run_etl
 from src.evaluate import run_evaluation
 from src.parsing import json_safe
 from src.splits import run_splits
+from src.submit import run_submission
 from src.tracker import run_tracker
 
 
@@ -29,9 +30,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m src.cli")
     parser.add_argument(
         "command",
-        choices=["check", "inventory", "etl", "splits", "track", "evaluate", "all"],
+        choices=["check", "inventory", "etl", "splits", "track", "evaluate", "submit", "all"],
     )
     parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--split", choices=["test", "eval"], default=None)
     args = parser.parse_args(argv)
     cfg = load_config(Path(args.config))
     cfg.ensure_dirs()
@@ -112,6 +114,12 @@ def main(argv: list[str] | None = None) -> int:
         _print(result)
         return 0
 
+    if args.command == "submit":
+        tracks = pd.read_parquet(cfg.reports / "tracks.parquet")
+        result = run_submission(tracks, cfg, split=args.split)
+        _print(result)
+        return 0
+
     result = run_etl(cfg, write_interim=True)
     document = run_splits(
         result.detections, result.ground_truth, result.friendly, cfg
@@ -120,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     tracks = run_tracker(result.detections, cfg)
     tracks.to_parquet(cfg.reports / "tracks.parquet", index=False)
     metrics = run_evaluation(tracks, result.ground_truth, cfg)
+    submission = run_submission(tracks, cfg, split=args.split)
     _print(
         {
             "etl": {
@@ -146,6 +155,15 @@ def main(argv: list[str] | None = None) -> int:
                 "recall": metrics["recall"],
                 "false_track_ratio": metrics["false_track_ratio"],
                 "id_switches": metrics["id_switches"],
+            },
+            "submission": {
+                "n_written": submission["n_written"],
+                "stages": submission["stages"],
+                "files": [
+                    item["output"]
+                    for item in submission["results"]
+                    if item["status"] == "ok"
+                ],
             },
             "outputs": {
                 "interim": str(cfg.interim),

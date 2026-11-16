@@ -136,7 +136,20 @@ python -m src.cli splits    # folds sin fuga (leave-one-iteration-out: cada fold
 python -m src.cli check     # valida plantillas Excel
 python -m src.cli track     # tracks EKF en reports/tracks.parquet
 python -m src.cli evaluate  # métricas de tracking en reports/
+python -m src.cli submit    # Excel de entrega en out/ (9 iteraciones)
 ```
+
+`submit` usa los tracks reales de `reports/tracks.parquet`; no hay datos mock. Los campos aún no implementados (modelo, protocolo, banda e identidad) salen como `Unknown`.
+
+Para entrega usa solo los 3 de evaluación:
+
+```bash
+python -m src.cli submit --split eval
+```
+
+Genera `out/scenario_1_iteration_3.xlsx`, `out/scenario_2_iteration_1.xlsx` y `out/scenario_2_iteration_3.xlsx`; los otros 6 de `out/` son de test para prueba local.
+
+`submit` mezcla sidecars opcionales por track si existen en `reports/`: `classification.parquet`, `identification.parquet` y `metadata.parquet`, con claves `split_group` y `track_id`. Si un sidecar no existe o está vacío, deja `Unknown` y continúa; no hay que tocar `classify.py`, `identify.py` ni `metadata.py`. El `track_id` de salida es un UUID5 determinista por track y los seriales se ajustan a los valores admitidos por la plantilla.
 
 Para reconstruir desde cero:
 

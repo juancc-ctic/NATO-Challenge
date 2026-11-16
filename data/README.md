@@ -64,7 +64,7 @@ Orden: `discover_iterations` → `build_*` (detecciones, ground truth y amigos) 
 - **`sensor_lat/lon` variables** en algunos sensores: documentado; no asumir constante, usar `has_sensor_location`.
 - **`serial` inferido de `objectInfo`/`id`**: conviene revisar falsos positivos/negativos antes de identificación.
 - **`friendly_uas` solo eval**: en test no hay lista de amigos (`friendly_available=False`), pero el ground truth de test sí trae `color`/`is_blue` y sirve para entrenar identidad amigo/enemigo.
-- **`out/` vacío** hasta la fase de submission; no hay tests automáticos, solo `check`.
+- **`out/`** se llena con `python -m src.cli submit` desde los tracks reales; no hay tests automáticos, solo `check` y `verify_submission.py`.
 
 Los recuentos exactos (detecciones, GT, amigos, duplicados, plantillas y folds) están en `reports/etl_summary.json` y `reports/check.json`; no los fijes aquí para que no envejezcan.
 
