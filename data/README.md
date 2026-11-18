@@ -12,7 +12,7 @@ El ETL es determinista y puede reejecutarse sobre datos de test no vistos (unida
 
 Esta es la referencia completa de lo que el ETL hace a los CSV originales, en orden. Si cambia el código, hay que actualizar esta tabla. No se modifica nada de `data/raw`.
 
-Orden: `discover_iterations` → `build_*` (detecciones, ground truth y amigos) → `build_origins` → `add_enu` → `deduplicate` → `_summary` → `write_interim`; después se generan los splits y se valida el Excel. El contrato de columnas está en [`src/schema.py`](../src/schema.py) y se documenta en [Esquema común de detecciones](#esquema-común-de-detecciones), [Esquema de `ground_truth.parquet`](#esquema-de-ground_truthparquet) y [Esquema de `friendly_uas.parquet`](#esquema-de-friendly_uasparquet).
+Orden: `discover_iterations` → `build_*` (detecciones, ground truth y amigos) → `build_origins` → `add_enu` → `deduplicate` → `filter_implausible_speed` → `_summary` → `write_interim`; después se generan los splits y se valida el Excel. El contrato de columnas está en [`src/schema.py`](../src/schema.py) y se documenta en [Esquema común de detecciones](#esquema-común-de-detecciones), [Esquema de `ground_truth.parquet`](#esquema-de-ground_truthparquet) y [Esquema de `friendly_uas.parquet`](#esquema-de-friendly_uasparquet).
 
 ### Tabla de tratamientos
 
@@ -32,8 +32,8 @@ Orden: `discover_iterations` → `build_*` (detecciones, ground truth y amigos) 
 | Metadatos | Extrae modelo, fabricante, protocolo, frecuencia, banda, MACs, Remote ID, evento y track, porque enriquecen identificación y clasificación con información que la posición no da | `model*`, `manufacturer`, `protocol`, `freq_*`, etc. |
 | Ground truth | Lee `DroneTag_COLOR_...`, deriva `color`/`is_blue` y usa `geo_altitude`, y calcula velocidad, heading y `flight_id`, para tener la verdad de referencia alineada con las detecciones | `ground_truth.parquet` |
 | Amigos | Lee el Excel, normaliza seriales y crea el conjunto por iteración, para poder marcar identidad amiga en inferencia | `friendly_uas.parquet` |
-| Dedup/orden | Calcula un SHA1 de la fila completa, se queda con la primera copia y ordena de forma determinista, para eliminar duplicados exactos y que el resultado sea reproducible | `row_uid`, Parquet |
-| Filtros | Aplica `keep_non_drone`, copia CSV opcional y compresión, para conservar lo útil sin inflar el interim | CSV/Parquet |
+| Dedup/orden | Deduplica por clave natural (tiempo, posición, azimut, clase y serial), sin ids únicos de fila, y ordena de forma determinista; así quita copias repetidas y el resultado es reproducible | `deduplicate_key`, Parquet |
+| Filtros | Aplica `keep_non_drone`, descarta detecciones con velocidad reportada > `max_plausible_speed_mps`, copia CSV opcional y compresión, para conservar lo útil sin inflar el interim | CSV/Parquet |
 | Splits | Asigna `test` → dev y `eval` → holdout y hace LOO por iteración, para validar en vuelos no vistos y evitar fuga de información | `splits.json`, `split_*.csv` |
 | Check | Valida la cabecera de 19 columnas y copia los timestamps de la plantilla, para garantizar que el Excel de entrega respeta el formato oficial | `check.json`, `reports/check/*.xlsx` |
 | Prefiltro | Limpia detecciones inválidas, excluye fusión/no-dron y descarta ecos de posición fuera de `max_range_m` | `reports/tracks.parquet` |
@@ -108,7 +108,7 @@ Una fila por detección:
 | `split_group` | grupo de split, p. ej. `test:S1:I1`; se usa para folds y evitar fuga |
 | `source_relpath` | ruta relativa del CSV original |
 | `raw_index` | índice de la fila dentro del CSV original |
-| `row_uid` | SHA1 de `split_group + sensor_id + contenido`; identifica y deduplica la detección |
+| `row_uid` | SHA1 de `split_group + sensor_id + contenido`; identifica la fila original, pero no se usa como clave de dedup |
 
 No usarlas como features del modelo: solo para agrupar, unir, deduplicar y auditar.
 

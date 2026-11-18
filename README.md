@@ -136,6 +136,7 @@ python -m src.cli splits    # folds sin fuga (leave-one-iteration-out: cada fold
 python -m src.cli check     # valida plantillas Excel
 python -m src.cli track     # tracks EKF en reports/tracks.parquet
 python -m src.cli evaluate  # métricas de tracking en reports/
+python scripts/diagnose_tracking.py  # diagnóstico GOSPA c=50/c=100, cobertura y duplicados
 python -m src.cli submit    # Excel de entrega en out/ (9 iteraciones)
 ```
 
@@ -317,12 +318,12 @@ Se usa la forma de Joseph para mantener $P$ simétrica y definida positiva.
 
 ### Ciclo de vida
 
-- `tentative`: track nuevo; pasa a `confirmed` al acumular `hits_to_confirm`.
+- `tentative`: track nuevo; no se emite. Pasa a `confirmed` al acumular `hits_to_confirm` (3) o `hits_to_confirm_unknown` (5) si nació de una detección `Unknown`.
 - `confirmed`: se actualiza con detección; si no hay detección pasa a `coast`.
-- `coast`: solo predice; se elimina si supera `max_coast_s`.
-- Detección sin asignar con posición y coincidencia multisensor (`initiation_min_sensors`): crea un `tentative`.
+- `coast`: solo predice; se elimina si supera `max_coast_s` (3 s). Se emite mientras viva.
+- Detección sin asignar con posición y corroboración multisensor (`initiation_min_sensors=2`) dentro de `initiation_window_s` (0.25 s) y `initiation_distance_m` (30 m): crea un `tentative`.
 - Si `initiate_from_drone_only` está activo, solo inicia con clase de dron.
-- Tracks duplicados dentro de `merge_distance_m` se fusionan.
+- Tracks duplicados dentro de `merge_distance_m` (100 m) se fusionan.
 
 ### Postfiltro
 
@@ -383,7 +384,49 @@ $$
 
 Para calcularlo, en cada iteración y timestamp se interpola el GT y se vuelve a emparejar tracks con GT mediante un Húngaro de evaluación. No es el Húngaro del tracker: aquel asocia detecciones a tracks con coste Mahalanobis/clase/serial; este asocia tracks ya estimados con GT usando distancia euclídea y trunca a $c$ (los pares a más de $c$ no cuentan como emparejados). Se suman las distancias de los pares válidos y $c^p/p$ por cada GT y cada track no emparejados, y se eleva a $1/p$. Después se promedian timestamps e iteraciones. Del mismo emparejamiento salen RMSE, recall (pares/GT) y tracks falsos (tracks no emparejados/tracks); los ID switches se cuentan por dron al cambiar de track. Se usa $p=2$ y $c$ en `evaluation.gospa_c_m`.
 
-El challenge solo indica que usa GOSPA, sin fijar $p$, $c$, $\alpha$ ni el emparejamiento. Aquí se sigue la definición estándar de Rahmathullah et al. (2017) con $p=2$, $c$ configurable y asignación óptima; por eso los valores absolutos dependen de $c$ y solo son comparables entre modelos evaluados con el mismo $c$.
+El challenge solo indica que usa GOSPA, sin fijar $p$, $c$, $\alpha$ ni el emparejamiento. Aquí se sigue la definición estándar de Rahmathullah et al. (2017) con $p=2$ y asignación óptima.
+
+La métrica principal interna es **`GOSPA(c=50 m, p=2)`**. Con `c=50`, cada GT no detectado o track falso paga `c^2/2 = 1250`, así que un solo fallo de cardinalidad ya da `GOSPA >= 35.4 m`. `GOSPA(c=100 m, p=2)` se calcula solo como referencia histórica y **no se mezcla** con la principal. Los valores absolutos dependen de `c` y solo son comparables entre modelos evaluados con el mismo `c`.
+
+### Diagnóstico reproducible
+
+`python scripts/diagnose_tracking.py` escribe `reports/tracking_diagnostics.csv` y `.json` con GOSPA `c=50`/`c=100`, descomposición, cobertura, duplicados y vida de tracks. No toca el tracker ni `config.yaml`.
+
+**Baseline actual** (hash `d928976a8a228ff5`):
+
+| Grupo | GOSPA c=50 | GOSPA c=100 | Recall c=50 | Falsos c=50 | ID switches |
+|---|---:|---:|---:|---:|---:|
+| S1:I1 | 73.2 | 135.7 | 0.160 | 0.615 | 9 |
+| S2:I2 | 84.3 | 153.7 | 0.136 | 0.753 | 20 |
+| S3:I1 | 87.8 | 172.6 | 0.048 | 0.879 | 5 |
+| S3:I2 | 86.9 | 165.6 | 0.102 | 0.827 | 21 |
+| S3:I3 | 73.7 | 142.8 | 0.075 | 0.869 | 34 |
+| S4:I4 | 96.9 | 182.1 | 0.121 | 0.724 | 7 |
+| **Media** | **83.8** | **158.8** | **0.107** | **0.778** | — |
+
+La descomposición completa (RMSE, GT/ts, tracks/ts, missed/ts, false/ts) está en `reports/tracking_diagnostics.csv`; no se repite aquí.
+
+La métrica `c=50` es la principal. El baseline a `c=100` queda solo como referencia histórica.
+
+**Hallazgos que explican el GOSPA**:
+
+- Cobertura GT→detección de posición: 16–39 % a ≤50 m y 28–54 % a ≤100 m; precisión de detección a ≤50 m: 1–14 %. El detalle por grupo está en `reports/tracking_diagnostics.csv`.
+- Solo-azimut: 0–88 % del GT tiene un bearing a ≤5°, pero solo 0–5 % tiene ≥2 sensores; la triangulación simultánea no es viable.
+- Tracks: ~700 IDs emitidos, mediana de vida 1–3 muestras; ~99 % `coast` y <1 % `confirmed`; no se emiten `tentative`.
+- Duplicados: 65 196 copias extra detectadas; el ETL ya las reduce a 161.
+- Altitud: GT `u` 3–123 m; tracks con medias 139–593 m y máximos >11 000 m.
+
+### Probado
+
+| Cambio | GOSPA c=50 | Recall | Falsos | Decisión |
+|---|---:|---:|---:|---|
+| Baseline inicial | 89.42 | 0.118 | 0.821 | referencia |
+| Dedup + velocidad >90 m/s | 89.15 | 0.118 | 0.817 | mantener |
+| No emitir `tentative` | 87.10 | 0.109 | 0.811 | mantener |
+| `max_coast_s=3` | 85.41 | 0.107 | 0.787 | mantener |
+| Iniciación multisensor (0.25 s, 30 m, 5 hits Unknown) | **83.78** | 0.107 | 0.778 | mantener |
+
+Probado y revertido: `merge_distance` 15/25/50, `hits_to_confirm` 2/4, `chi2_gate` 16.3, `q`/`σ_v`/`use_altitude`, y evaluar solo `confirmed`. El detalle está en `reports/`.
 
 ### Limitaciones
 
@@ -391,15 +434,22 @@ El challenge solo indica que usa GOSPA, sin fijar $p$, $c$, $\alpha$ ni el empar
 - 87 filas `cyber` de `eval:Dataset_II:S2:I1` no traen `u`; se actualizan en 2D y `u` se propaga con covarianza grande.
 - `σ_az` es un default por tipo, no una medida del sensor; hay que calibrarlo.
 - El baseline no modela sesgo de sensor ni correlación entre sensores.
+- **Iniciación**: 2 sensores dentro de 0.25 s y 30 m; los `Unknown` necesitan 5 hits para confirmar. Corregido.
+- **Merge**: `merge_distance_m=100` puede fusionar drones reales. En S3:I1 el 52 % de los timestamps tiene dos GT a menos de 100 m; aun así, 100 da mejor GOSPA que 15/25/50.
+- **Evaluación**: no se emiten `tentative`; `coast` se emite hasta `max_coast_s=3`. `_positions` usa `nan_to_num(u=0)`.
+- **Solo-azimut**: no inicia tracks. La triangulación simultánea casi nunca es posible (0–5 % de timestamps con ≥2 sensores a ≤5°); la vía realista es tracking bearing-only temporal con un sensor y modelo de movimiento.
+- **S4:I4** es el grupo más difícil: 24 % de cobertura de posición a ≤50 m y 2 % de bearing a ≤5°. Sin otra fuente de datos, no es realista bajarlo a 50 m.
 
 ### Decisiones y notas
 
-- Estado 3D y salida de tracks `tentative` y `confirmed`; `coast` también se emite mientras viva.
-- Prefiltro: limpieza común de fusión/no-dron/medidas inválidas y, con `prefilter.method: range`, descarte de ecos de posición a más de `prefilter.max_range_m` (5 km) del origen ENU.
-- Inicio de tracks desconocidos: exige coincidencia de al menos `initiation_min_sensors` (2) sensores en `initiation_distance_m` (100 m); los tracks con clase de dron pueden iniciarse con uno.
-- `σ_az` es un default por tipo, no una medida del sensor; se calibra con residuos.
-- La selección geométrica de sensores está implementada pero desactivada (`geometry.enabled: false`); el baseline usa todos los sensores válidos.
-- `chi2_gate: 100` es una puerta permisiva inicial (≈10σ) para no perder detecciones reales; se ajustará con validación.
+- **Métrica principal**: `GOSPA(c=50 m, p=2)`; `c=100` solo como referencia histórica.
+- **README = fuente única de verdad**: lo obsoleto se borra o reescribe; el histórico vive en git.
+- **Un cambio cada vez**, validación en folds de `test`, `eval` solo al final.
+- Estado 3D CV; no se emiten `tentative`; `coast` hasta 3 s.
+- Prefiltro `range` a 5 km; ETL con dedup natural y filtro de velocidad >90 m/s.
+- Iniciación con 2 sensores en 0.25 s y 30 m; `Unknown` requiere 5 hits.
+- Pendiente de calibrar: `σ_az`. `q`, gating y `merge_distance` ya están probados.
+- Postfiltro `none` y geometría desactivada en el baseline.
 
 ### Referencias
 
@@ -410,9 +460,11 @@ El challenge solo indica que usa GOSPA, sin fijar $p$, $c$, $\alpha$ ni el empar
 - Särkkä, S. (2013). *Bayesian Filtering and Smoothing*. Cambridge University Press. Cap. 4: discretización del modelo CV; cap. 9: suavizado RTS.
 - ResearchGate. *Single-target state estimation using Kalman filter and RTS smoother*. https://www.researchgate.net/figure/Single-target-state-estimation-using-Kalman-filter-and-RTS-smoother_fig4_320182941
 
-### Resultados del baseline
+### Estado actual
 
-Primera pasada en `test:S1:I1` (sin ajuste fino): GOSPA ≈ 142 m, RMSE ≈ 53 m, recall ≈ 0.30, tracks falsos ≈ 0.44 e ID switches ≈ 155. Sirve como referencia; el ajuste de `q`, `σ_az`, puertas y ciclo de vida queda pendiente.
+- **Hecho**: diagnóstico reproducible, dedup natural, filtro de velocidad >90 m/s, `status` en rejilla, calibración de movimiento/gating, no emitir `tentative`, `max_coast_s=3` e iniciación multisensor temporal.
+- **Baseline**: **83.78** a `c=50`.
+- **Pendiente**: tracking solo-azimut, congelar, ejecutar `eval` y entregar.
 
 ## Clasificación
 
@@ -442,7 +494,7 @@ No hay umbrales mínimos para las métricas que debamos superar, pero los siguie
 
 | Área | Métrica oficial | Peso | Rango típico | Objetivo interno | Baseline actual |
 |---|---|---:|---|---|---|
-| Tracking | GOSPA ($c=100$ m, $p=2$) | 0.4 | 20–100 m | < 50 m | 142–190 m |
+| Tracking | GOSPA ($c=50$ m, $p=2$) | 0.4 | 20–100 m | < 50 m | 73.2–96.9 m (media 83.8) |
 | Clasificación | Recall | 0.2 | 0.60–0.90 | > 0.75 | pendiente |
 | Identificación | Recall | 0.1 | 0.50–0.90 | > 0.70 | pendiente |
 | Fusión | Acierto de metadatos | 0.3 | 0.50–0.80 | > 0.70 | pendiente |
@@ -461,20 +513,20 @@ python app.py --data /ruta/a/csv
 
 ## Configuración
 
-Todos los parámetros están en `config.yaml`.
+Todos los parámetros están en `config.yaml`. La métrica principal de tracking es `GOSPA(c=50 m, p=2)`; `gospa_c_reference_m: 100.0` se usa solo como comparación histórica.
+
+El diagnóstico reproducible del baseline se obtiene con `python scripts/diagnose_tracking.py` y queda en `reports/tracking_diagnostics.csv` y `.json`.
 
 ## TODO
 
-Hecho: Fases 0-5 (repo, inventario, ETL, baseline de tracking y evaluador). Pendiente:
+Hecho: auditoría, diagnóstico reproducible, README sincronizado, `evaluation.gospa_c_m=50`, dedup natural, filtro de velocidad, `status` en la rejilla, calibración de movimiento/gating, ciclo de vida e iniciación multisensor. Pendiente:
 
-- **IMPORTANTE**: los sensores solo-azimut (`rf`, `acústico`, `cámara`) no inician tracks en el baseline; solo actualizan tracks nacidos de sensores de posición. Falta iniciación por triangulación/paralaje con varios sensores solo-azimut y validar si merece la pena.
-- Ampliar el tracker con UKF, CA/IMM, gating conforme y selección geométrica de sensores; el baseline actual es EKF de velocidad constante con Húngaro y ciclo de vida.
-- Añadir suavizado **RTS** antes del remuestreo, en `src/postfilter.py`/`src/tracker.py`: guardar velocidad y covarianzas de predicción para una pasada backward por track (forward-backward), y compararlo con `moving_average`.
-- Ampliar `src/prefilter.py` con outliers de saltos de velocidad/aceleración, altura máxima, confianza mínima y filtros por clase o sensor.
-- Conectar `det_conf` y `class_conf` al flujo: `det_conf` en prefiltro (`min_det_conf`), coste de asociación (`w_conf·(1-det_conf)`) o peso de `R`; `class_conf` en el voto de clasificación y en `classification_confidence`. Y comparar qué tal la evaluación con y sin ellos.
-- Calibrar `σ_az` y el ruido de proceso con folds de test; congelar antes de `eval`.
-- Resolver clasificación, identificación y metadatos (Fases 6-8): votar por track, decidir amigo/enemigo por serial y rellenar la ficha técnica (modelo, protocolo, banda).
-- Ajustar y calibrar (Fase 9): cambiar un parámetro a la vez, congelar `config.yaml` y fijar umbrales con FPR objetivo usando folds de test.
-- Dejar hecha la entrega (Fase 10): generar los 3 Excel de evaluación, escribir el PDF de metodología y montar la demo.
+- Tracking solo-azimut con EKF/UKF, prior de rango y modelo de movimiento; cámara/acústico primero.
+- Resolver `u` ausente en evaluación (`nan_to_num(u=0)`) y valorar postfiltro/plausibilidad.
+- Calibrar `σ_az` con residuos y valorar UKF/CA/IMM y selección geométrica.
+- Congelar `config.yaml`, ejecutar `eval` una vez, generar los 3 Excel y cerrar el README.
+- Resolver clasificación, identificación y metadatos: votar por track, decidir amigo/enemigo por serial y rellenar la ficha técnica (modelo, protocolo, banda).
+- Añadir suavizado **RTS** antes del remuestreo y compararlo con `moving_average`.
+- Conectar `det_conf` y `class_conf` al flujo: prefiltro, coste de asociación o peso de `R`, y voto de clasificación.
 - Añadir tests automáticos con pytest.
-- Crear el documento compartido (p. ej. Drive) con brainstorming de familias de modelos por tarea (tracking, clasificación, identificación, metadatos y fusión), incluyendo **prefiltro** de datos, **postfiltro** de tracks estimados con funciones analíticas y heurísticas (decidir cuáles usar), **feature engineering**, reglas analíticas, tratamiento de datos de sensores, **modelos**, reducción/filtrado de datos, zoo de candidatos, **SOTA** e ideas a mantener/descartar.
+- Crear el documento compartido (p. ej. Drive) con brainstorming de familias de modelos por tarea, incluyendo **prefiltro**, **postfiltro**, **feature engineering**, reglas analíticas, **modelos**, reducción/filtrado, zoo de candidatos, **SOTA** e ideas a mantener/descartar.

@@ -13,8 +13,21 @@ project:
 
 # Parámetros del ETL y de la base de datos interim.
 etl:
-  # Elimina filas exactamente duplicadas por sensor e iteración.
+  # Elimina duplicados por clave natural dentro de la misma iteración y sensor.
+  # No usa `row_uid` porque incluye `raw_index` y no detecta copias repetidas.
   deduplicate: true
+  # Clave natural: contenido de la detección, sin ids únicos de fila.
+  deduplicate_key:
+    - split_group
+    - sensor_id
+    - ts_ms
+    - n
+    - e
+    - u
+    - az_deg
+    - el_deg
+    - class_norm
+    - serial_norm
   # Conserva pájaros/coches para filtrarlos después; no se entregan.
   keep_non_drone: true
   # Escribe también una copia CSV además de Parquet.
@@ -43,6 +56,7 @@ etl:
       lon: 5.86
       alt_m: 0.0
   # Velocidad máxima plausible para descartar saltos, en m/s.
+  # Se aplica en el ETL sobre `vn/ve/vu` reportados.
   max_plausible_speed_mps: 90.0
   # Sensores cuyo location_* es posición del objeto.
   position_capable_sensor_types:
@@ -91,13 +105,18 @@ splits:
   random_state: 42
 
 # Parámetros del tracker EKF.
+# Baseline congelado: no cambiar valores sin registrar el experimento
+# en README §Tracking. Cada cambio se valida en folds de `test`, uno a la vez.
 tracker:
   # Dimensión de posición del estado: 2 o 3.
+  # 3D CV es el baseline. `use_altitude=false` empeoró GOSPA/recall;
+  # `state_dim=2` no se probó porque la evaluación es 3D.
   state_dim: 3
-  # Usa altitud cuando la detección la trae.
+  # Usa altitud cuando la detección la trae. Mantener en true.
   use_altitude: true
   # Emite también tracks tentative.
-  output_tentative: true
+  # false: no se emiten tentative; GOSPA baja y los ID switches caen.
+  output_tentative: false
   # Prefiltro de detecciones, paso previo al tracking.
   prefilter:
     # none | range
@@ -114,6 +133,7 @@ tracker:
   motion:
     model: constant_velocity
     # Aceleración eficaz del ruido de proceso, en m/s².
+    # Mejor valor de la rejilla 0.1–2 en folds de test.
     process_noise_mps2: 2.0
     # Tope de dt para evitar Q desmedido en huecos largos, en s.
     max_dt_s: 5.0
@@ -121,13 +141,18 @@ tracker:
   measurement:
     use_elevation: false
     # Incertidumbre angular por tipo si la detección no la trae, en grados.
+    # No hay `σ_az` en la BD; estos defaults no están calibrados. Residuos
+    # observados: acoustic ~1-3°, camera ~0-2° sin clutter, radar bearing
+    # 12-68°, rf 20-40°. Pendiente de calibrar.
     sigma_az_deg:
       rf: 5.0
       acoustic: 10.0
       camera: 1.0
     # Sigma inicial de velocidad si el track nace sin ella, en m/s.
+    # Mejor valor de la rejilla 5–50 en los 6 folds de test.
     initial_velocity_sigma_mps: 50.0
     # Sigma inicial de altitud si el track nace sin u, en m.
+    # Solo afecta a 87 detecciones sin `u`; no se calibra por ahora.
     initial_altitude_sigma_m: 1000.0
   # Gating: descarta asociaciones improbables antes del Húngaro.
   gating:
@@ -135,8 +160,11 @@ tracker:
     # Nivel de confianza de la distribución χ².
     confidence: 0.999
     # Si no es null, sustituye al χ² calculado por grados de libertad.
+    # Probado 13.8–100: 16.3 mejora GOSPA pero baja recall/ID.
+    # Se mantiene 100.
     chi2_gate: 100.0
     # Distancia máxima de asociación para medidas de posición, en metros.
+    # No se baja: el error típico GT→detección es 82–304 m.
     gate_distance_m: 300.0
   # Asociación uno-a-uno.
   association:
@@ -146,16 +174,24 @@ tracker:
     invalid_cost: 1.0e12
   # Ciclo de vida de tracks.
   lifecycle:
+    # Probado 2/3/4; 3 es el mejor.
     hits_to_confirm: 3
-    max_coast_s: 5.0
+    # Tracks Unknown necesitan más hits para confirmar (probado 4/5; 5 mejor).
+    hits_to_confirm_unknown: 5
+    # Probado 1/2/3/5; 3 baja GOSPA sin perder recall.
+    max_coast_s: 3.0
     max_tentative_misses: 3
+    # Probado 15/25/50/100; 100 sigue siendo el mejor GOSPA.
     merge_distance_m: 100.0
     # Si es true, solo inicia tracks con clase de dron; más preciso, menos recall.
     initiate_from_drone_only: false
     # Sensores distintos que deben coincidir para iniciar un track desconocido.
     initiation_min_sensors: 2
+    # Ventana temporal para corroborar un inicio multisensor, en segundos.
+    # Probado 0.25 s / 30 m: mejor GOSPA sin perder recall.
+    initiation_window_s: 0.25
     # Radio de coincidencia multisensor para iniciar, en metros.
-    initiation_distance_m: 100.0
+    initiation_distance_m: 30.0
   # Postfiltro opcional de los tracks finales.
   postfilter:
     # none | fill_gaps | moving_average | plausibility
@@ -189,11 +225,17 @@ classification:
 
 # Métricas de evaluación de tracking.
 evaluation:
-  # Distancia de corte de GOSPA, en metros.
-  gospa_c_m: 100.0
+  # Distancia de corte de GOSPA, en metros. Métrica principal interna.
+  # Con c=50 y p=2, cada GT no detectado o track falso cuesta c^2/2 = 1250.
+  # Objetivo interno: GOSPA(c=50) < 50 m.
+  gospa_c_m: 50.0
   # Exponente de GOSPA.
   gospa_p: 2.0
+  # Corte secundario solo para comparación histórica.
+  # No mezclar valores de distinto c en la misma tabla.
+  gospa_c_reference_m: 100.0
   # Distancia máxima para considerar un track emparejado, en metros.
+  # Solo se usa para contar ID switches; GOSPA usa gospa_c_m.
   match_distance_m: 50.0
 
 # Formato del Excel de entrega.

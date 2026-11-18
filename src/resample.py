@@ -63,6 +63,10 @@ def resample_tracks(
                 state = F @ state
                 covariance = F @ covariance @ F.T + Q
             state_dim = int(state.size // 2)
+            # El snapshot es el último update; entre updates el track está en coast.
+            status = snapshot["status"]
+            if int(timestamp) > int(snapshot["ts_ms"]) and status == "confirmed":
+                status = "coast"
             # Fila de salida: posición, covarianza y estado del track.
             output.append(
                 {
@@ -78,7 +82,7 @@ def resample_tracks(
                     "C_ee": float(covariance[1, 1]),
                     "C_eu": float(covariance[1, 2]) if state_dim >= 3 else 0.0,
                     "C_uu": float(covariance[2, 2]) if state_dim >= 3 else 0.0,
-                    "status": snapshot["status"],
+                    "status": status,
                     "hits": int(snapshot["hits"]),
                     "misses": int(snapshot["misses"]),
                     "age": int(snapshot["age"]),

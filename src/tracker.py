@@ -42,6 +42,7 @@ class Track:
     last_update_ms: int = 0
     class_norm: str | None = None
     serial_norm: str | None = None
+    initiated_by_drone: bool = False
 
 
 def _tracker_config(cfg: Any) -> Mapping[str, Any]:
@@ -178,6 +179,7 @@ def initialize_track(
         last_update_ms=int(now_ms),
         class_norm=detection.get("class_norm"),
         serial_norm=detection.get("serial_norm"),
+        initiated_by_drone=_is_true(detection.get("class_is_drone")),
     )
 
 
@@ -216,35 +218,42 @@ def _track_priority(track: Track) -> tuple[int, int]:
 
 def _filter_initiations(
     detections: Sequence[Mapping[str, Any]],
+    buffer: Sequence[Mapping[str, Any]],
     tracker_cfg: Mapping[str, Any],
 ) -> list[Mapping[str, Any]]:
     """[ciclo de vida] Filtra detecciones para iniciar tracks.
 
-    Pertenece al ciclo de vida: exige coincidencia multisensor para iniciar.
+    Pertenece al ciclo de vida: exige coincidencia multisensor dentro de una
+    ventana temporal y un radio, no en el mismo timestamp exacto.
     """
     lifecycle_cfg = _subcfg(tracker_cfg, "lifecycle")
     min_sensors = int(lifecycle_cfg.get("initiation_min_sensors", 1))
     if min_sensors <= 1:
         return list(detections)
     distance_m = float(lifecycle_cfg.get("initiation_distance_m", 100.0))
+    window_ms = int(float(lifecycle_cfg.get("initiation_window_s", 1.0)) * 1000)
     filtered: list[Mapping[str, Any]] = []
-    for index, detection in enumerate(detections):
+    for detection in detections:
         # Un track con clase de dron puede iniciarse con un solo sensor.
         if _is_true(detection.get("class_is_drone")):
             filtered.append(detection)
             continue
         if not _finite(detection.get("n")) or not _finite(detection.get("e")):
             continue
-        # Un track desconocido necesita varios sensores dentro del radio.
+        if not _finite(detection.get("ts_ms")):
+            continue
+        # Un track desconocido necesita varios sensores dentro de la ventana.
         sensors = {str(detection.get("sensor_id", ""))}
-        for other_index, other in enumerate(detections):
-            if index == other_index:
-                continue
+        for other in buffer:
             if str(other.get("sensor_id", "")) == str(
                 detection.get("sensor_id", "")
             ):
                 continue
             if not _finite(other.get("n")) or not _finite(other.get("e")):
+                continue
+            if not _finite(other.get("ts_ms")):
+                continue
+            if abs(int(detection["ts_ms"]) - int(other["ts_ms"])) > window_ms:
                 continue
             distance = math.hypot(
                 float(detection["n"]) - float(other["n"]),
@@ -255,6 +264,26 @@ def _filter_initiations(
         if len(sensors) >= min_sensors:
             filtered.append(detection)
     return filtered
+
+
+def _update_initiation_buffer(
+    buffer: list[Mapping[str, Any]],
+    detections: Sequence[Mapping[str, Any]],
+    now_ms: int,
+    tracker_cfg: Mapping[str, Any],
+) -> list[Mapping[str, Any]]:
+    """[ciclo de vida] Mantiene detecciones recientes para corroborar inicios."""
+    lifecycle_cfg = _subcfg(tracker_cfg, "lifecycle")
+    window_ms = int(float(lifecycle_cfg.get("initiation_window_s", 1.0)) * 1000)
+    for detection in detections:
+        if _can_initiate(detection, tracker_cfg):
+            buffer.append(detection)
+    return [
+        detection
+        for detection in buffer
+        if _finite(detection.get("ts_ms"))
+        and now_ms - int(detection["ts_ms"]) <= window_ms
+    ]
 
 
 def _merge_tracks(tracks: list[Track], merge_distance_m: float) -> list[Track]:
@@ -309,6 +338,7 @@ def manage_tracks(
     tracks: list[Track],
     updated_ids: set[str],
     unassigned_detections: Sequence[Mapping[str, Any]],
+    initiation_buffer: Sequence[Mapping[str, Any]],
     now_ms: int,
     tracker_cfg: Mapping[str, Any],
     next_id: int,
@@ -320,6 +350,9 @@ def manage_tracks(
     """
     lifecycle_cfg = _subcfg(tracker_cfg, "lifecycle")
     hits_to_confirm = int(lifecycle_cfg.get("hits_to_confirm", 3))
+    hits_to_confirm_unknown = int(
+        lifecycle_cfg.get("hits_to_confirm_unknown", hits_to_confirm)
+    )
     max_coast_ms = int(float(lifecycle_cfg.get("max_coast_s", 5.0)) * 1000)
     max_tentative_misses = int(lifecycle_cfg.get("max_tentative_misses", 2))
     merge_distance_m = float(lifecycle_cfg.get("merge_distance_m", 50.0))
@@ -328,7 +361,12 @@ def manage_tracks(
             track.hits += 1
             track.misses = 0
             track.age += 1
-            if track.status in {"tentative", "coast"} and track.hits >= hits_to_confirm:
+            threshold = (
+                hits_to_confirm
+                if track.initiated_by_drone
+                else hits_to_confirm_unknown
+            )
+            if track.status in {"tentative", "coast"} and track.hits >= threshold:
                 track.status = "confirmed"
         else:
             track.misses += 1
@@ -340,7 +378,9 @@ def manage_tracks(
             elif track.status == "tentative" and track.misses >= max_tentative_misses:
                 track.status = "deleted"
     tracks = [track for track in tracks if track.status != "deleted"]
-    for detection in _filter_initiations(unassigned_detections, tracker_cfg):
+    for detection in _filter_initiations(
+        unassigned_detections, initiation_buffer, tracker_cfg
+    ):
         if not _can_initiate(detection, tracker_cfg):
             continue
         track_id = f"{split_group}:T{next_id:04d}"
@@ -405,6 +445,7 @@ def run_tracker(detections: pd.DataFrame, cfg: Any) -> pd.DataFrame:
         timestamps = np.sort(group["ts_ms"].unique())
         tracks: list[Track] = []
         history: list[dict[str, Any]] = []
+        initiation_buffer: list[Mapping[str, Any]] = []
         next_id = 1
         last_timestamp: int | None = None
         for timestamp in timestamps:
@@ -467,10 +508,17 @@ def run_tracker(detections: pd.DataFrame, cfg: Any) -> pd.DataFrame:
                     for detection_index in result.unassigned_detections:
                         unassigned.append(records[detection_index])
                 # Ciclo de vida: confirma, coast, elimina y crea tracks.
+                initiation_buffer = _update_initiation_buffer(
+                    initiation_buffer,
+                    unassigned,
+                    int(timestamp),
+                    tracker_cfg,
+                )
                 tracks, next_id = manage_tracks(
                     tracks,
                     updated_ids,
                     unassigned,
+                    initiation_buffer,
                     int(timestamp),
                     tracker_cfg,
                     next_id,
@@ -484,10 +532,17 @@ def run_tracker(detections: pd.DataFrame, cfg: Any) -> pd.DataFrame:
                     for record in records
                     if _can_initiate(record, tracker_cfg)
                 ]
+                initiation_buffer = _update_initiation_buffer(
+                    initiation_buffer,
+                    unassigned,
+                    int(timestamp),
+                    tracker_cfg,
+                )
                 tracks, next_id = manage_tracks(
                     [],
                     set(),
                     unassigned,
+                    initiation_buffer,
                     int(timestamp),
                     tracker_cfg,
                     next_id,

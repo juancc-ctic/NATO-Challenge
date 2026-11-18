@@ -1037,13 +1037,55 @@ def add_enu(
     return detections, ground_truth
 
 
+DEFAULT_DEDUPLICATE_KEY = [
+    "split_group",
+    "sensor_id",
+    "ts_ms",
+    "n",
+    "e",
+    "u",
+    "az_deg",
+    "el_deg",
+    "class_norm",
+    "serial_norm",
+]
+
+
 def deduplicate(detections: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, int]:
-    """Elimina duplicados por `row_uid` y devuelve cuántos quitó."""
+    """Elimina duplicados por clave natural y devuelve cuántos quitó.
+
+    La clave incluye el contenido de la detección (tiempo, posición, azimut,
+    clase y serial) y excluye ids únicos de fila como `row_uid` o `raw_index`.
+    """
     if detections.empty or not bool(cfg.etl.get("deduplicate", True)):
         return detections, 0
+    key = cfg.etl.get("deduplicate_key") or DEFAULT_DEDUPLICATE_KEY
+    key = [column for column in key if column in detections.columns]
+    if not key:
+        return detections, 0
     before = len(detections)
-    deduplicated = detections.drop_duplicates(subset=["row_uid"], keep="first").copy()
+    deduplicated = detections.drop_duplicates(subset=key, keep="first").copy()
     return deduplicated, before - len(deduplicated)
+
+
+def filter_implausible_speed(
+    detections: pd.DataFrame,
+    cfg: Config,
+) -> tuple[pd.DataFrame, int]:
+    """Descarta detecciones con velocidad reportada superior al máximo plausible."""
+    max_speed = cfg.etl.get("max_plausible_speed_mps")
+    if detections.empty or max_speed is None:
+        return detections, 0
+    max_speed = float(max_speed)
+    if max_speed <= 0.0:
+        return detections, 0
+    speed = np.sqrt(
+        detections["vn"].to_numpy(dtype=float) ** 2
+        + detections["ve"].to_numpy(dtype=float) ** 2
+        + detections["vu"].to_numpy(dtype=float) ** 2
+    )
+    implausible = np.isfinite(speed) & (speed > max_speed)
+    return detections.loc[~implausible].copy(), int(implausible.sum())
 
 
 def _write_parquet(frame: pd.DataFrame, path: Path, cfg: Config) -> None:
@@ -1187,6 +1229,7 @@ def _quality(result: EtlResult) -> dict[str, Any]:
             "missing_timestamp": int((issues["issue"] == "missing_or_invalid_timestamp").sum()) if not issues.empty else 0,
             "missing_gt_timestamp": int((issues["issue"] == "missing_or_invalid_gt_timestamp").sum()) if not issues.empty else 0,
             "missing_gt_location": int((issues["issue"] == "missing_or_invalid_gt_location").sum()) if not issues.empty else 0,
+            "implausible_speed": int(result.summary.get("n_implausible_speed_removed", 0)),
         },
         "issues_by_type": issue_counts,
     }
@@ -1217,6 +1260,9 @@ def _summary(result: EtlResult) -> dict[str, Any]:
             "template_files": int(result.summary.get("n_template_files", 0)),
             "detections_out": int(len(detections)),
             "detections_duplicates_removed": int(result.summary.get("n_duplicates_removed", 0)),
+            "detections_implausible_speed_removed": int(
+                result.summary.get("n_implausible_speed_removed", 0)
+            ),
             "ground_truth_out": int(len(gt)),
             "friendly_out": int(len(friendly)),
             "issues": int(len(result.issues)),
@@ -1318,6 +1364,7 @@ def run_etl(cfg: Config, write_interim: bool = True) -> EtlResult:
     origins = build_origins(detections, cfg)
     detections, ground_truth = add_enu(detections, ground_truth, cfg, origins)
     detections, duplicates_removed = deduplicate(detections, cfg)
+    detections, implausible_removed = filter_implausible_speed(detections, cfg)
     detections = detections.sort_values(
         ["split", "split_group", "ts_ms", "sensor_id", "raw_index"]
     ).reset_index(drop=True)
@@ -1338,6 +1385,7 @@ def run_etl(cfg: Config, write_interim: bool = True) -> EtlResult:
             "n_friendly_files": n_friendly_files,
             "n_template_files": n_template_files,
             "n_duplicates_removed": duplicates_removed,
+            "n_implausible_speed_removed": implausible_removed,
         },
     )
     summary = _summary(result)
