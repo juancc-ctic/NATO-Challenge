@@ -31,6 +31,8 @@ class Measurement:
     sensor_type: str
     class_norm: str | None = None
     serial_norm: str | None = None
+    kind: str = "position"
+    prediction: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -65,7 +67,7 @@ def _subcfg(cfg: Mapping[str, Any] | None, key: str) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _sigma_az_deg(detection: Mapping[str, Any], sensor_type: str, cfg: Mapping[str, Any] | None) -> float:
+def sigma_az_deg(detection: Mapping[str, Any], sensor_type: str, cfg: Mapping[str, Any] | None) -> float:
     value = detection.get("sigma_az_deg")
     if _finite(value):
         return float(value)
@@ -114,6 +116,8 @@ def _position_measurement(
         sensor_type=str(detection.get("sensor_type", "other")),
         class_norm=detection.get("class_norm"),
         serial_norm=detection.get("serial_norm"),
+        kind="position",
+        prediction=np.asarray(z, dtype=float),
     )
 
 
@@ -142,7 +146,7 @@ def _azimuth_measurement(
     if r2 <= 1e-9:
         return None
     sensor_type = str(detection.get("sensor_type", "other"))
-    sigma_az_rad = math.radians(_sigma_az_deg(detection, sensor_type, cfg))
+    sigma_az_rad = math.radians(sigma_az_deg(detection, sensor_type, cfg))
     H = np.zeros((1, state_dim), dtype=float)
     H[0, 0] = -de / r2
     H[0, 1] = dn / r2
@@ -154,6 +158,7 @@ def _azimuth_measurement(
         and _finite(detection.get("el_deg"))
         and _finite(detection.get("sensor_u"))
     )
+    prediction = [math.atan2(de, dn)]
     if use_elevation:
         sensor_u = float(detection["sensor_u"])
         du = float(state[2]) - sensor_u
@@ -166,6 +171,7 @@ def _azimuth_measurement(
         H_el[0, 2] = r / rho2
         H = np.vstack([H, H_el])
         z.append(math.radians(float(detection["el_deg"])))
+        prediction.append(math.atan2(du, r))
         sigma_el_deg = _subcfg(cfg, "measurement").get("sigma_el_deg", sigma_az_rad)
         sigmas.append(math.radians(float(sigma_el_deg)))
     return Measurement(
@@ -176,6 +182,8 @@ def _azimuth_measurement(
         sensor_type=sensor_type,
         class_norm=detection.get("class_norm"),
         serial_norm=detection.get("serial_norm"),
+        kind="bearing",
+        prediction=np.asarray(prediction, dtype=float),
     )
 
 
@@ -198,6 +206,19 @@ def measurement_model(
     if has_bearing:
         return _azimuth_measurement(detection, predicted, cfg)
     return None
+
+
+def measurement_residual(measurement: Measurement) -> np.ndarray:
+    """[gating/actualización] Residuo entre medida y predicción.
+
+    En medidas angulares se envuelve a `[-π, π]`; en posición es directo.
+    """
+    if measurement.prediction is None:
+        raise ValueError("La medida no tiene predicción linealizada")
+    residual = measurement.z - measurement.prediction
+    if measurement.kind == "bearing":
+        residual = (residual + np.pi) % (2.0 * np.pi) - np.pi
+    return residual
 
 
 def measurement_information(measurement: Measurement) -> np.ndarray:

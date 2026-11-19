@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from src.associate import assignment, build_cost_matrix, gating
-from src.geometry import measurement_model
+from src.geometry import measurement_model, measurement_residual, sigma_az_deg
 from src.motion import motion_model
 from src.postfilter import postprocess_tracks
 from src.prefilter import preprocess_detections
@@ -43,6 +43,7 @@ class Track:
     class_norm: str | None = None
     serial_norm: str | None = None
     initiated_by_drone: bool = False
+    bearing_only: bool = False
 
 
 def _tracker_config(cfg: Any) -> Mapping[str, Any]:
@@ -122,7 +123,10 @@ def update(
     Pertenece a actualización del EKF: calcula innovación, ganancia de Kalman y
     covarianza con la forma de Joseph.
     """
-    residual = measurement.z - measurement.H @ track.state
+    if measurement.kind == "bearing" and track.bearing_only:
+        residual = measurement_residual(measurement)
+    else:
+        residual = measurement.z - measurement.H @ track.state
     innovation = measurement.H @ track.covariance @ measurement.H.T + measurement.R
     gain = track.covariance @ measurement.H.T @ np.linalg.inv(innovation)
     track.state = track.state + gain @ residual
@@ -133,6 +137,8 @@ def update(
         + gain @ measurement.R @ gain.T
     )
     track.last_update_ms = int(now_ms)
+    if getattr(measurement, "kind", "position") == "position":
+        track.bearing_only = False
     if measurement.class_norm is not None:
         track.class_norm = measurement.class_norm
     if measurement.serial_norm is not None:
@@ -158,14 +164,24 @@ def initialize_track(
     altitude_sigma = float(measurement_cfg.get("initial_altitude_sigma_m", 1000.0))
     velocity_sigma = float(measurement_cfg.get("initial_velocity_sigma_mps", 50.0))
     state = np.zeros(2 * state_dim, dtype=float)
-    state[0] = float(detection["n"])
-    state[1] = float(detection["e"])
     covariance = np.zeros((2 * state_dim, 2 * state_dim), dtype=float)
-    covariance[0, 0] = _as_float(detection.get("sigma_n"), 50.0) ** 2
-    covariance[1, 1] = _as_float(detection.get("sigma_e"), 50.0) ** 2
-    if state_dim == 3:
-        state[2] = _as_float(detection.get("u"), 0.0)
-        covariance[2, 2] = _as_float(detection.get("sigma_u"), altitude_sigma) ** 2
+    has_position = (
+        _is_true(detection.get("has_position"))
+        and _finite(detection.get("n"))
+        and _finite(detection.get("e"))
+    )
+    if has_position:
+        state[0] = float(detection["n"])
+        state[1] = float(detection["e"])
+        covariance[0, 0] = _as_float(detection.get("sigma_n"), 50.0) ** 2
+        covariance[1, 1] = _as_float(detection.get("sigma_e"), 50.0) ** 2
+        if state_dim == 3:
+            state[2] = _as_float(detection.get("u"), 0.0)
+            covariance[2, 2] = _as_float(detection.get("sigma_u"), altitude_sigma) ** 2
+    else:
+        _initialize_bearing_state(
+            state, covariance, detection, state_dim, tracker_cfg
+        )
     covariance[state_dim:, state_dim:] = (velocity_sigma**2) * np.eye(state_dim)
     return Track(
         track_id=track_id,
@@ -180,6 +196,69 @@ def initialize_track(
         class_norm=detection.get("class_norm"),
         serial_norm=detection.get("serial_norm"),
         initiated_by_drone=_is_true(detection.get("class_is_drone")),
+        bearing_only=not has_position,
+    )
+
+
+def _initialize_bearing_state(
+    state: np.ndarray,
+    covariance: np.ndarray,
+    detection: Mapping[str, Any],
+    state_dim: int,
+    tracker_cfg: Mapping[str, Any],
+) -> None:
+    """[ciclo de vida] Inicia un estado 3D desde solo azimut.
+
+    Usa un prior de rango y de altitud para romper la ambigüedad de escala;
+    la covarianza es ancha en radial y estrecha en tangencial.
+    """
+    lifecycle_cfg = _subcfg(tracker_cfg, "lifecycle")
+    measurement_cfg = _subcfg(tracker_cfg, "measurement")
+    prior_range = float(lifecycle_cfg.get("bearing_init_range_m", 1000.0))
+    range_sigma = float(
+        lifecycle_cfg.get("bearing_init_range_sigma_m", 1000.0)
+    )
+    prior_altitude = float(lifecycle_cfg.get("bearing_init_altitude_m", 50.0))
+    altitude_sigma = float(
+        measurement_cfg.get("initial_altitude_sigma_m", 1000.0)
+    )
+    az = math.radians(float(detection["az_deg"]))
+    sensor_n = float(detection["sensor_n"])
+    sensor_e = float(detection["sensor_e"])
+    state[0] = sensor_n + prior_range * math.cos(az)
+    state[1] = sensor_e + prior_range * math.sin(az)
+    if state_dim >= 3:
+        state[2] = prior_altitude
+    sigma_az = math.radians(
+        sigma_az_deg(
+            detection,
+            str(detection.get("sensor_type", "other")),
+            tracker_cfg,
+        )
+    )
+    sigma_tangent = prior_range * sigma_az
+    radial = np.array([math.cos(az), math.sin(az)], dtype=float)
+    tangent = np.array([-math.sin(az), math.cos(az)], dtype=float)
+    covariance[:2, :2] = (
+        range_sigma**2 * np.outer(radial, radial)
+        + sigma_tangent**2 * np.outer(tangent, tangent)
+    )
+    if state_dim >= 3:
+        covariance[2, 2] = altitude_sigma**2
+
+
+def _is_bearing_only(detection: Mapping[str, Any]) -> bool:
+    """[ciclo de vida] Indica si una detección solo aporta azimut.
+
+    Pertenece al ciclo de vida: exige azimut y posición del sensor, no del
+    objeto.
+    """
+    return (
+        not _is_true(detection.get("has_position"))
+        and _is_true(detection.get("has_bearing"))
+        and _finite(detection.get("az_deg"))
+        and _finite(detection.get("sensor_n"))
+        and _finite(detection.get("sensor_e"))
     )
 
 
@@ -191,20 +270,21 @@ def _can_initiate(
 
     Pertenece al ciclo de vida: decide nacimiento de un track.
     """
-    if (
-        not _is_true(detection.get("has_position"))
-        or not _finite(detection.get("n"))
-        or not _finite(detection.get("e"))
-        or _is_true(detection.get("class_is_non_drone"))
-    ):
+    if _is_true(detection.get("class_is_non_drone")):
         return False
-    if bool(
-        _subcfg(tracker_cfg, "lifecycle").get(
-            "initiate_from_drone_only", False
-        )
-    ):
-        return _is_true(detection.get("class_is_drone"))
-    return True
+    has_position = (
+        _is_true(detection.get("has_position"))
+        and _finite(detection.get("n"))
+        and _finite(detection.get("e"))
+    )
+    lifecycle_cfg = _subcfg(tracker_cfg, "lifecycle")
+    if has_position:
+        if bool(lifecycle_cfg.get("initiate_from_drone_only", False)):
+            return _is_true(detection.get("class_is_drone"))
+        return True
+    if not bool(lifecycle_cfg.get("initiate_from_bearing", False)):
+        return False
+    return _is_bearing_only(detection)
 
 
 def _track_priority(track: Track) -> tuple[int, int]:
@@ -228,42 +308,97 @@ def _filter_initiations(
     """
     lifecycle_cfg = _subcfg(tracker_cfg, "lifecycle")
     min_sensors = int(lifecycle_cfg.get("initiation_min_sensors", 1))
-    if min_sensors <= 1:
+    initiate_from_bearing = bool(
+        lifecycle_cfg.get("initiate_from_bearing", False)
+    )
+    if min_sensors <= 1 and not initiate_from_bearing:
         return list(detections)
     distance_m = float(lifecycle_cfg.get("initiation_distance_m", 100.0))
     window_ms = int(float(lifecycle_cfg.get("initiation_window_s", 1.0)) * 1000)
     filtered: list[Mapping[str, Any]] = []
     for detection in detections:
-        # Un track con clase de dron puede iniciarse con un solo sensor.
-        if _is_true(detection.get("class_is_drone")):
-            filtered.append(detection)
-            continue
-        if not _finite(detection.get("n")) or not _finite(detection.get("e")):
-            continue
-        if not _finite(detection.get("ts_ms")):
-            continue
-        # Un track desconocido necesita varios sensores dentro de la ventana.
-        sensors = {str(detection.get("sensor_id", ""))}
-        for other in buffer:
-            if str(other.get("sensor_id", "")) == str(
-                detection.get("sensor_id", "")
-            ):
+        has_position = (
+            _is_true(detection.get("has_position"))
+            and _finite(detection.get("n"))
+            and _finite(detection.get("e"))
+        )
+        if has_position:
+            # Un track con clase de dron puede iniciarse con un solo sensor.
+            if _is_true(detection.get("class_is_drone")):
+                filtered.append(detection)
                 continue
-            if not _finite(other.get("n")) or not _finite(other.get("e")):
+            if not _finite(detection.get("ts_ms")):
                 continue
-            if not _finite(other.get("ts_ms")):
-                continue
-            if abs(int(detection["ts_ms"]) - int(other["ts_ms"])) > window_ms:
-                continue
-            distance = math.hypot(
-                float(detection["n"]) - float(other["n"]),
-                float(detection["e"]) - float(other["e"]),
-            )
-            if distance <= distance_m:
-                sensors.add(str(other.get("sensor_id", "")))
-        if len(sensors) >= min_sensors:
-            filtered.append(detection)
+            # Un track desconocido necesita varios sensores dentro de la ventana.
+            sensors = {str(detection.get("sensor_id", ""))}
+            for other in buffer:
+                if str(other.get("sensor_id", "")) == str(
+                    detection.get("sensor_id", "")
+                ):
+                    continue
+                if not _finite(other.get("n")) or not _finite(
+                    other.get("e")
+                ):
+                    continue
+                if not _finite(other.get("ts_ms")):
+                    continue
+                if (
+                    abs(int(detection["ts_ms"]) - int(other["ts_ms"]))
+                    > window_ms
+                ):
+                    continue
+                distance = math.hypot(
+                    float(detection["n"]) - float(other["n"]),
+                    float(detection["e"]) - float(other["e"]),
+                )
+                if distance <= distance_m:
+                    sensors.add(str(other.get("sensor_id", "")))
+            if len(sensors) >= min_sensors:
+                filtered.append(detection)
+        elif initiate_from_bearing and _is_bearing_only(detection):
+            if _bearing_supported(detection, buffer, lifecycle_cfg):
+                filtered.append(detection)
     return filtered
+
+
+def _bearing_supported(
+    detection: Mapping[str, Any],
+    buffer: Sequence[Mapping[str, Any]],
+    lifecycle_cfg: Mapping[str, Any],
+) -> bool:
+    """[ciclo de vida] Exige varios bearings coherentes en el tiempo.
+
+    Pertenece al ciclo de vida: corrobora un inicio solo-azimut con el mismo
+    sensor, evitando depender de una única detección.
+    """
+    min_bearings = int(lifecycle_cfg.get("bearing_init_min_bearings", 3))
+    if min_bearings <= 1:
+        return True
+    window_ms = int(
+        float(lifecycle_cfg.get("bearing_init_window_s", 2.0)) * 1000
+    )
+    tolerance = math.radians(
+        float(lifecycle_cfg.get("bearing_init_angle_deg", 10.0))
+    )
+    if not _finite(detection.get("ts_ms")):
+        return False
+    az0 = math.radians(float(detection["az_deg"]))
+    ts0 = int(detection["ts_ms"])
+    sensor_id = str(detection.get("sensor_id", ""))
+    times: set[int] = set()
+    for other in buffer:
+        if not _is_bearing_only(other):
+            continue
+        if str(other.get("sensor_id", "")) != sensor_id:
+            continue
+        ts = int(other["ts_ms"])
+        if abs(ts - ts0) > window_ms:
+            continue
+        az = math.radians(float(other["az_deg"]))
+        delta = abs((az - az0 + math.pi) % (2.0 * math.pi) - math.pi)
+        if delta <= tolerance:
+            times.add(ts)
+    return len(times) >= min_bearings
 
 
 def _update_initiation_buffer(
@@ -275,6 +410,14 @@ def _update_initiation_buffer(
     """[ciclo de vida] Mantiene detecciones recientes para corroborar inicios."""
     lifecycle_cfg = _subcfg(tracker_cfg, "lifecycle")
     window_ms = int(float(lifecycle_cfg.get("initiation_window_s", 1.0)) * 1000)
+    if bool(lifecycle_cfg.get("initiate_from_bearing", False)):
+        window_ms = max(
+            window_ms,
+            int(
+                float(lifecycle_cfg.get("bearing_init_window_s", 2.0))
+                * 1000
+            ),
+        )
     for detection in detections:
         if _can_initiate(detection, tracker_cfg):
             buffer.append(detection)
@@ -300,6 +443,8 @@ def _merge_tracks(tracks: list[Track], merge_distance_m: float) -> list[Track]:
             continue
         for other in ordered[i + 1 :]:
             if other.status == "deleted":
+                continue
+            if bool(track.bearing_only) != bool(other.bearing_only):
                 continue
             distance = float(np.linalg.norm(track.state[:2] - other.state[:2]))
             if distance > merge_distance_m:
@@ -472,6 +617,9 @@ def run_tracker(detections: pd.DataFrame, cfg: Any) -> pd.DataFrame:
                         measurement_fn,
                         method=gating_method,
                         cfg=tracker_cfg,
+                        track_bearing_only=[
+                            track.bearing_only for track in tracks
+                        ],
                     )
                     # Coste = Mahalanobis + penalización de clase/serial.
                     cost = build_cost_matrix(

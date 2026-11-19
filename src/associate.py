@@ -13,7 +13,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import chi2
 
-from src.geometry import Measurement
+from src.geometry import Measurement, measurement_residual
 
 DEFAULT_INVALID_COST = 1.0e12
 
@@ -75,6 +75,7 @@ def gating(
     measurement_fn: Callable[[Mapping[str, Any], np.ndarray], Measurement | None],
     method: str = "chi2",
     cfg: Mapping[str, Any] | None = None,
+    track_bearing_only: Sequence[bool] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """[gating] Devuelve máscara válida y distancia Mahalanobis².
 
@@ -88,6 +89,7 @@ def gating(
             detections,
             measurement_fn,
             cfg,
+            track_bearing_only,
         )
     raise ValueError(f"Método de gating no soportado: {method}")
 
@@ -98,6 +100,7 @@ def _gating_chi2(
     detections: Sequence[Mapping[str, Any]],
     measurement_fn: Callable[[Mapping[str, Any], np.ndarray], Measurement | None],
     cfg: Mapping[str, Any] | None,
+    track_bearing_only: Sequence[bool] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """[gating] Implementación χ² concreta.
 
@@ -119,7 +122,14 @@ def _gating_chi2(
             if measurement is None:
                 continue
             # Residuo e innovación para la distancia de Mahalanobis.
-            residual = measurement.z - measurement.H @ state
+            if (
+                measurement.kind == "bearing"
+                and track_bearing_only is not None
+                and bool(track_bearing_only[i])
+            ):
+                residual = measurement_residual(measurement)
+            else:
+                residual = measurement.z - measurement.H @ state
             innovation = measurement.H @ covariance @ measurement.H.T + measurement.R
             try:
                 distance = float(residual.T @ np.linalg.solve(innovation, residual))

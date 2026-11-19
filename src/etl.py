@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
@@ -190,6 +190,22 @@ def _row_uid(split_group: str, sensor_id: str, row: dict[str, Any]) -> str:
     return hashlib.sha1(payload).hexdigest()
 
 
+def _default_sigmas(
+    sensor_type: str,
+    cfg: Config,
+) -> tuple[float, float, float]:
+    """[ETL] Devuelve el sigma por defecto de n/e/u para un tipo de sensor."""
+    defaults = cfg.etl.get("default_sigma_m", {})
+    value = defaults.get(sensor_type, 50.0)
+    if isinstance(value, Mapping):
+        return (
+            float(value.get("n", value.get("all", 50.0))),
+            float(value.get("e", value.get("all", 50.0))),
+            float(value.get("u", value.get("all", 50.0))),
+        )
+    return float(value), float(value), float(value)
+
+
 def _sigma(
     row: dict[str, Any],
     sensor_type: str,
@@ -199,10 +215,10 @@ def _sigma(
     sx = safe_float(row.get("location_xError"))
     sy = safe_float(row.get("location_yError"))
     sz = safe_float(row.get("location_zError"))
-    defaults = cfg.etl.get("default_sigma_m", {})
-    default = float(defaults.get(sensor_type, 50.0))
+    default_n, default_e, default_u = _default_sigmas(sensor_type, cfg)
     floor = float(cfg.etl.get("sigma_floor_m", 0.5))
     cap = float(cfg.etl.get("sigma_cap_m", 5000.0))
+    cap_is_missing = bool(cfg.etl.get("sigma_cap_is_missing", False))
     sigma_n = math.nan
     sigma_e = math.nan
     sigma_u = math.nan
@@ -225,15 +241,26 @@ def _sigma(
     if math.isfinite(sz) and sz > 0:
         sigma_u = sz
         reported = True
+    # Un sigma en el tope se trata como placeholder, no como medida real.
+    if cap_is_missing:
+        if math.isfinite(sigma_n) and sigma_n >= cap:
+            sigma_n = math.nan
+            reported = False
+        if math.isfinite(sigma_e) and sigma_e >= cap:
+            sigma_e = math.nan
+            reported = False
+        if math.isfinite(sigma_u) and sigma_u >= cap:
+            sigma_u = math.nan
+            reported = False
     used_default = False
     if not math.isfinite(sigma_n):
-        sigma_n = default
+        sigma_n = default_n
         used_default = True
     if not math.isfinite(sigma_e):
-        sigma_e = default
+        sigma_e = default_e
         used_default = True
     if not math.isfinite(sigma_u):
-        sigma_u = default
+        sigma_u = default_u
         used_default = True
     clipped = False
     for name, value in (("n", sigma_n), ("e", sigma_e), ("u", sigma_u)):
