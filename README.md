@@ -165,6 +165,40 @@ Detalle del ETL, esquema común, columnas, tablas, calidad y limitaciones: [`dat
 
 Salidas: `data/interim/` (tablas Parquet), `reports/` (auditoría y métricas) y `out/` (Excel de entrega).
 
+## Etiquetas: detecciones ↔ ground truth
+
+```bash
+python -m src.cli labels    # tras `etl`; no forma parte de `all`
+```
+
+Empareja cada detección de `test` con el dron GT que estaba allí en ese instante ([`src/labels.py`](src/labels.py)), para tener etiquetas de entrenamiento (dron, RED/BLUE, modelo, ala fija/multirrotor) y medir los sensores. `eval` no tiene GT y queda como `no_gt`.
+
+Cómo asigna:
+
+1. Interpola la posición GT de cada dron al `ts_ms` de cada detección (±`time_tolerance_s`).
+2. Error: distancia horizontal para sensores con posición, o error de azimut para los solo-rumbo. La altura no se usa porque los sensores mezclan datums verticales.
+3. Por detección: dron con menor error / puerta del sensor (`labels.gate_m`, `labels.gate_deg`). Fuera de la puerta → `clutter`; dos drones dentro → `ambiguous`.
+4. Votos por track crudo (`object_id`) y por serial. Si tienen suficientes detecciones y pureza (`vote_min_hits`, `vote_min_purity`), mandan sobre la detección suelta: serial > track > detección.
+
+Salidas:
+
+| Artefacto | Contenido |
+|---|---|
+| `data/interim/detection_labels.parquet` | una fila por detección (`row_uid`): `label_status` (`matched`, `ambiguous`, `clutter`, `unusable`, `no_gt`), `label_source`, `label_drone_key`, `label_err`, `label_color`, `label_is_blue`, `label_model`, `label_model_type`, `label_gt_static` |
+| `reports/labels/summary.json` | recuentos y **avisos** de lo que no cuadra |
+| `reports/labels/sensors.csv` | por sensor e iteración: % emparejado/ambiguo/clutter, error mediano y p90, y desfase temporal que minimiza el error |
+| `reports/labels/tracks.csv` | pureza de cada track crudo (¿siempre el mismo dron?) |
+| `reports/labels/serials.csv` | a qué dron cae cada serial y con qué pureza |
+| `reports/labels/drones.csv` | por dron GT: detecciones por tipo de sensor y bandera `gt_static` |
+| `reports/labels/class_vs_gt.csv` | clase que reporta cada sensor frente al tipo real del dron |
+
+Avisos que genera hoy con los datos de test (revisar antes de entrenar):
+
+- **Fusión (LJJX)**: el 100% de lo que empareja son drones BLUE. Usarla como feature filtra la identidad; excluirla.
+- **Latencias**: LJJX va ~2 s tarde (error 20–30 m → 2–7 m al corregirlo) y el radar UXYJ ~3–4 s (60 → 20 m). Útil para el tracker.
+- **5 GT estáticos** (Matrice 300, RQ y Skyranger en S3; Autel Evo 2 y FPV en S4): la etiqueta Dronetag no despega, pero algunos reciben cientos de detecciones.
+- **Seriales**: algunos caen en varios drones (pureza 51–65%) y no se usan. `F5FHD233M00DEYG6` cae en el DJI3 en S1 y en un FPV en S3. `F45TB21BR1AE03FP` y `1581F45TB21BR1AE03FP` son el mismo dron con y sin prefijo.
+
 ## Tracking
 
 El baseline está implementado en `src/prefilter.py` (prefiltro), `src/motion.py` ($F$ y $Q$), `src/geometry.py` (modelos de medida e información), `src/associate.py` (gating y asignación), `src/tracker.py` (EKF y ciclo de vida), `src/postfilter.py` (postfiltro opcional) y `src/resample.py` (remuestreo). El flujo es:

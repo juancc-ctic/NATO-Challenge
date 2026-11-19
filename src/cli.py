@@ -1,4 +1,4 @@
-"""CLI del pipeline: `inventory`, `etl`, `splits`, `track`, `evaluate`, `check` y `all`.
+"""CLI del pipeline: `inventory`, `etl`, `splits`, `labels`, `track`, `evaluate`, `check` y `all`.
 
 Existe para ejecutar el pipeline por pasos y de forma reproducible.
 """
@@ -15,6 +15,7 @@ from src.check import run_check
 from src.config import load_config
 from src.etl import run_etl
 from src.evaluate import run_evaluation
+from src.labels import run_labels
 from src.parsing import json_safe
 from src.splits import run_splits
 from src.submit import run_submission
@@ -30,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m src.cli")
     parser.add_argument(
         "command",
-        choices=["check", "inventory", "etl", "splits", "track", "evaluate", "submit", "all"],
+        choices=["check", "inventory", "etl", "splits", "labels", "track", "evaluate", "submit", "all"],
     )
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--split", choices=["test", "eval"], default=None)
@@ -90,6 +91,10 @@ def main(argv: list[str] | None = None) -> int:
                 },
             }
         )
+        return 0
+
+    if args.command == "labels":
+        _print(run_labels(cfg))
         return 0
 
     if args.command == "track":

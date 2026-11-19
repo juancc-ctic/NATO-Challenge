@@ -223,6 +223,48 @@ classification:
   # Tiempo mínimo para cambiar de clase.
   hysteresis_s: 5.0
 
+# Preasignación de etiquetas: emparejar detecciones de test con el dron GT.
+labels:
+  # Detección y GT a más de este desfase no se comparan, en segundos.
+  time_tolerance_s: 1.0
+  # Puerta de distancia horizontal por tipo de sensor con posición, en metros.
+  # Horizontal porque los sensores mezclan datums verticales (~70 m de offset).
+  gate_m:
+    radar: 100.0
+    fusion: 100.0
+    cyber: 150.0
+    other: 150.0
+    rf: 300.0
+  # Puerta de error de azimut por tipo de sensor solo-rumbo, en grados.
+  gate_deg:
+    camera: 4.0
+    acoustic: 10.0
+    rf: 10.0
+  # Posiciones a más de esta distancia del origen se tratan como inválidas.
+  max_range_m: 20000.0
+  # Desfase máximo explorado para detectar relojes desplazados, en segundos.
+  offset_scan_s: 5.0
+  # Voto por track crudo / serial: mínimo de detecciones y pureza para usarlo.
+  vote_min_hits: 5
+  vote_min_purity: 0.7
+  # GT "estático": la etiqueta Dronetag no despega.
+  static_gt:
+    max_height_m: 10.0
+    max_extent_m: 60.0
+  # Tipo de dron según el nombre del modelo GT (primer token que coincida).
+  model_types:
+    heidrun: Fixed Wing
+    vector: Fixed Wing
+    rq: Fixed Wing
+    fpv: Rotary Wing (FPV)
+    skyranger: Rotary Wing
+    dji: Rotary Wing
+    mavic: Rotary Wing
+    matrice: Rotary Wing
+    autel: Rotary Wing
+    anafi: Rotary Wing
+    skydio: Rotary Wing
+
 # Métricas de evaluación de tracking.
 evaluation:
   # Distancia de corte de GOSPA, en metros. Métrica principal interna.
