@@ -579,6 +579,14 @@ def run_tracker(detections: pd.DataFrame, cfg: Any) -> pd.DataFrame:
     assignment_method = str(
         _subcfg(tracker_cfg, "association").get("method", "hungarian")
     )
+    # PENDIENTE DE DECIDIR (propuesta, no aplicada): corregir la latencia de algunos sensores
+    # antes de asociar. `python -m src.cli labels` (reports/labels/sensors.csv) mide que el error
+    # con el GT baja mucho si se adelanta su `ts_ms`:
+    #   - fusión LJJX (Charlie/Delta/Echo): ~2 s tarde; error mediano 20-30 m -> 2-7 m.
+    #   - radar UXYJ (Charlie/Echo): ~3-4 s tarde; error mediano ~60 m -> ~20 m.
+    # Idea: restar un offset por sensor_id (en config.yaml) a `ts_ms` aquí, y medir el efecto con
+    # `scripts/compare_report.py --tracks-b` o el visor (`--tracks-b`). Ojo: LJJX solo ve drones
+    # amigos y no existe en eval.
     # Prefiltro: limpia y descarta detecciones no plausibles.
     frame = preprocess_detections(detections, tracker_cfg)
     if frame.empty:

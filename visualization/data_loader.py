@@ -286,6 +286,18 @@ def load_dataset(data_dir: str) -> Dataset:
     drones = [_read_drone(f) for f in drone_files]
     return build_dataset(sensors, drones)
 
+
+def load_iteration(iteration_dir: str) -> Dataset:
+    """Carga una iteración tal cual viene en los datos originales, sin copiar CSV.
+
+    Lee `SensorData/*.csv` y los DroneTag de `GroundTruthData/` (o `GrountTruthData/`).
+    """
+    sensor_files = sorted(glob.glob(os.path.join(iteration_dir, "SensorData", "*.csv")))
+    drone_files = sorted(glob.glob(os.path.join(iteration_dir, "*Tru*", "DroneTag_*.csv")))
+    sensors = [_read_sensor(f) for f in sensor_files]
+    drones = [_read_drone(f) for f in drone_files]
+    return build_dataset(sensors, drones)
+
 def bearing_rays(sensor: Sensor, df: pd.DataFrame, length: float, use_agl: bool):
     """Calcula el extremo de cada rayo de marcación (azimut desde el norte, horario)."""
     az = np.radians(df["az"].values)

@@ -547,6 +547,15 @@ pip install -r requirements.txt
 python app.py --data /ruta/a/csv
 ```
 
+Para ver las trayectorias del tracker frente a las reales (líneas de error, elipses de incertidumbre, detecciones coloreadas por etiqueta y comparación de dos runs):
+
+```bash
+python app.py --iteration "../data/raw/test/Scenario 1/Iteration 1" \
+              --interim ../data/interim --tracks ../reports/tracks.parquet [--tracks-b otro/tracks.parquet]
+```
+
+Informe HTML con lo mismo para todas las iteraciones de test: `python scripts/compare_report.py` (→ `reports/compare_tracks.html`). Detalle en [`visualization/README.md`](visualization/README.md).
+
 ## Configuración
 
 Todos los parámetros están en `config.yaml`. La métrica principal de tracking es `GOSPA(c=50 m, p=2)`; `gospa_c_reference_m: 100.0` se usa solo como comparación histórica.

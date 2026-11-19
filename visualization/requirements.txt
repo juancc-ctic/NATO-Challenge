@@ -2,3 +2,7 @@ dash>=2.14
 plotly>=5.18
 pandas>=2.0
 numpy>=1.24
+# Para tracks y comparación con el GT (importa src/compare.py y src/evaluate.py)
+scipy>=1.11
+pyarrow>=14
+PyYAML>=6

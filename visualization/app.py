@@ -7,6 +7,12 @@ Uso:
     python app.py --data RUTA     # carpeta con los CSV Delta_* y DroneTag_*
     python app.py --port 8051
 
+    # Iteración original + tracks del tracker + comparación con el GT:
+    python app.py --iteration "../data/raw/test/Scenario 1/Iteration 1" \
+                  --interim ../data/interim --tracks ../reports/tracks.parquet
+    # Comparar dos runs del tracker (antes / después de un cambio):
+    python app.py ... --tracks ../reports/tracks.parquet --tracks-b otra/tracks.parquet
+
 Abrir después http://127.0.0.1:8050 en el navegador.
 """
 from __future__ import annotations
@@ -19,9 +25,11 @@ import os
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, State, ctx, dcc, html, no_update
+from dash import Dash, Input, Output, Patch, State, ctx, dcc, html, no_update
+from plotly.subplots import make_subplots
 
-from data_loader import _read_drone, _read_sensor, bearing_rays, build_dataset, load_dataset
+import tracks_layer as TL
+from data_loader import _read_drone, _read_sensor, bearing_rays, build_dataset, load_dataset, load_iteration
 
 # --------------------------------------------------------------------------- #
 # Configuración visual
@@ -65,9 +73,48 @@ parser = argparse.ArgumentParser(description="Visor 3D multisensor")
 parser.add_argument("--data", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
 parser.add_argument("--port", type=int, default=8050)
 parser.add_argument("--host", default="127.0.0.1")
+parser.add_argument("--iteration", default=None,
+                    help="Carpeta de una iteración original (con SensorData/ y GroundTruthData/); sustituye a --data")
+parser.add_argument("--interim", default=None, help="data/interim del ETL (origins, GT, detecciones, etiquetas)")
+parser.add_argument("--split-group", default=None, help="p. ej. test:S1:I1; se deduce de --iteration si se omite")
+parser.add_argument("--tracks", default=None, help="tracks.parquet del tracker (run A)")
+parser.add_argument("--tracks-b", default=None, help="segundo tracks.parquet para comparar (run B)")
+parser.add_argument("--config", default=None, help="config.yaml (corte GOSPA); por defecto el del repo")
 args, _ = parser.parse_known_args()
 
-DS = load_dataset(args.data)
+DS = load_iteration(args.iteration) if args.iteration else load_dataset(args.data)
+LAYER = None
+
+
+def _cfg():
+    path = args.config or os.path.join(TL.ROOT, "config.yaml")
+    try:
+        import yaml
+        with open(path, encoding="utf-8") as fh:
+            return yaml.safe_load(fh) or {}
+    except Exception:
+        return {}
+
+
+def _load_layer():
+    """Carga tracks, comparación y etiquetas si se pasó --interim (y --tracks para los tracks)."""
+    global LAYER
+    if not args.interim:
+        LAYER = None
+        return
+    group = args.split_group or (TL.infer_split_group(args.iteration) if args.iteration else None)
+    if not group:
+        print("Aviso: no se pudo deducir --split-group; no se cargan tracks ni etiquetas.")
+        LAYER = None
+        return
+    paths = {"A": args.tracks, "B": args.tracks_b}
+    LAYER = TL.load_layer(DS, DS.t0, args.interim, group, {k: v for k, v in paths.items() if v}, _cfg())
+    for name, run in LAYER.runs.items():
+        it = run.compare.get("iterations") if run.compare else None
+        if it is not None and len(it):
+            r = it.iloc[0]
+            print(f"Run {name}: {run.tracks.track_id.nunique()} tracks · GOSPA medio {r.gospa_mean:.1f} m · "
+                  f"{r.pct_tracked:.0f}% del tiempo seguido · {int(r.id_switches)} cambios de track")
 T0 = DS.t0
 DURATION = 60
 ALL_CLASSES = []
@@ -116,13 +163,18 @@ def _refresh_globals():
 
 
 _refresh_globals()
+_load_layer()
+
+
+def _drone_colors():
+    return {k: d.color for k, d in DS.drones.items()}
 
 
 # --------------------------------------------------------------------------- #
 # Construcción de la figura
 # --------------------------------------------------------------------------- #
 def build_figure(t_now, sensors_on, drones_on, opts, color_mode, min_conf, ray_len,
-                 z_max, play_mode, window_s, use_agl):
+                 z_max, play_mode, window_s, use_agl, tr_opts=(), run_name="A"):
     fig = go.Figure()
     zc = "z_agl" if use_agl else "z_raw"
     show_rays = "rays" in opts
@@ -241,6 +293,14 @@ def build_figure(t_now, sensors_on, drones_on, opts, color_mode, min_conf, ray_l
             marker=dict(size=8, color=dr.color, symbol="circle", line=dict(color="#fff", width=2)),
             showlegend=False, name=dr.key, hoverinfo="skip"))
 
+    # Tracker: trayectorias estimadas, error real↔estimado, incertidumbre y etiquetas
+    if LAYER is not None:
+        if "labels" in tr_opts:
+            for tr in TL.label_traces(go, LAYER, t_now, t_lo, zc, z_max, _drone_colors()):
+                fig.add_trace(tr)
+        for tr in TL.track_traces(go, LAYER, run_name, t_now, t_lo, zc, z_max, list(tr_opts), DS, _drone_colors()):
+            fig.add_trace(tr)
+
     ztitle = "Altura aprox. sobre terreno (m)" if use_agl else "Cota original (m)"
     axis = dict(backgroundcolor=BG, gridcolor="#2a3540", zerolinecolor="#3a4855", color=MUTED,
                 showspikes=False)
@@ -293,6 +353,90 @@ def _get_marks():
     step = max(60, (DURATION // 10 // 60) * 60)
     return {int(s): (T0 + pd.Timedelta(seconds=int(s))).strftime("%H:%M") for s in range(0, DURATION + 1, step)}
 
+def _tracker_section():
+    if LAYER is None:
+        return section("Tracker y comparación", html.Div(
+            "Sin tracks cargados. Lanza con --interim (y --tracks) para ver las trayectorias estimadas, "
+            "compararlas con las reales y colorear las detecciones por etiqueta.", className="help"),
+            dcc.Checklist(id="tr-opts", options=[], value=[], style={"display": "none"}),
+            dcc.RadioItems(id="run", options=[{"label": "A", "value": "A"}], value="A", style={"display": "none"}))
+    runs = list(LAYER.runs)
+    opts = []
+    if runs:
+        opts += [{"label": "Trayectorias estimadas (discontinuas)", "value": "tracks"},
+                 {"label": "Error real↔estimado (línea blanca)", "value": "errors"},
+                 {"label": "Elipse de incertidumbre 2σ", "value": "ellipse"}]
+    if not LAYER.labelled.empty:
+        opts.append({"label": "Detecciones coloreadas por etiqueta", "value": "labels"})
+    children = [html.Div(f"Iteración {LAYER.split_group}", className="help", style={"marginBottom": "4px"}),
+                dcc.Checklist(id="tr-opts", options=opts, value=[o["value"] for o in opts if o["value"] in ("tracks", "errors")])]
+    children.append(html.Div([html.Span("Run", className="help", style={"marginRight": "8px"}),
+                              dcc.RadioItems(id="run", value=runs[0] if runs else "A", inline=True,
+                                             options=[{"label": f" {r} ", "value": r} for r in runs] or
+                                             [{"label": " — ", "value": "A"}])],
+                             style={"display": "flex" if len(runs) > 1 else "none", "alignItems": "center",
+                                    "marginTop": "4px"}))
+    children.append(html.Div("Al activar las etiquetas conviene ocultar los sensores para ver solo los colores "
+                             "del etiquetado. Gris = ruido (no casa con ningún dron real).", className="help",
+                             style={"marginTop": "4px"}))
+    return section("Tracker y comparación", *children)
+
+
+def _fmt(v):
+    if isinstance(v, (float, np.floating)):
+        return "–" if not np.isfinite(v) else f"{v:.1f}"
+    return str(v)
+
+
+def _table(df, highlight=None):
+    head = html.Tr([html.Th(c) for c in df.columns])
+    rows = []
+    for _, r in df.iterrows():
+        cells = []
+        for c in df.columns:
+            style = {}
+            if highlight and c in highlight and isinstance(r[c], (int, float, np.number)) and np.isfinite(r[c]) and r[c] != 0:
+                better = (r[c] < 0) if highlight[c] == "low" else (r[c] > 0)
+                style = {"color": "#5ee36a" if better else "#ff6f61", "fontWeight": 600}
+            cells.append(html.Td(_fmt(r[c]), style=style))
+        rows.append(html.Tr(cells))
+    return html.Table([html.Thead(head), html.Tbody(rows)], className="tbl")
+
+
+def _summary_children():
+    if LAYER is None or not LAYER.runs:
+        return [html.Div("Sin tracks cargados.", className="help")]
+    tabs = TL.summary_tables(LAYER)
+    if not tabs:
+        return [html.Div("Esta iteración no tiene ground truth: solo se pueden ver los tracks, no compararlos.",
+                         className="help")]
+    out = []
+    for name, t in tabs.items():
+        it = t["iteration"]
+        if len(it):
+            r = it.iloc[0]
+            out.append(html.Div([
+                html.B(f"Run {name}: "),
+                f"GOSPA medio {r.gospa_mean:.1f} m (posición {r.gospa_loc:.1f} · perdidos {r.gospa_missed:.1f} · "
+                f"falsos {r.gospa_false:.1f}) · {r.pct_tracked:.0f}% del tiempo seguido · "
+                f"{int(r.id_switches)} cambios de track · {int(r.tracks_never_matched)} tracks que nunca casan con un dron"],
+                className="help", style={"margin": "6px 0", "color": TEXT}))
+        out.append(_table(t["drones"]))
+    if len(tabs) == 2:
+        a, b = tabs["A"]["drones"], tabs["B"]["drones"]
+        m = a.merge(b, on="Dron", suffixes=(" A", " B"))
+        diff = pd.DataFrame({"Dron": m["Dron"]})
+        for col, better in (("% seguido", "high"), ("Error medio (m)", "low"), ("Cambios de track", "low")):
+            diff[f"{col} A"] = m[f"{col} A"]
+            diff[f"{col} B"] = m[f"{col} B"]
+            diff[f"Δ {col}"] = m[f"{col} B"] - m[f"{col} A"]
+        out.insert(0, html.Div([html.B("A → B"), " (verde = B mejora, rojo = B empeora)"],
+                               className="help", style={"margin": "6px 0", "color": TEXT}))
+        out.insert(1, _table(diff, highlight={"Δ % seguido": "high", "Δ Error medio (m)": "low",
+                                              "Δ Cambios de track": "low"}))
+    return out
+
+
 sensor_options = _get_sensor_options()
 drone_options = _get_drone_options()
 marks = _get_marks()
@@ -319,6 +463,12 @@ app.index_string = app.index_string.replace("</head>", f"""
  .sidebar label, .sidebar label span {{ color:{TEXT} !important; }}
  .sidebar .sub {{ color:{MUTED} !important; }}
  .dash-slider-mark, .rc-slider-mark-text, [class*="mark"] {{ color:{MUTED} !important; font-size:10px; }}
+ .bottom {{ height:330px; min-height:330px; border-top:1px solid #24303a; display:flex; flex-direction:column; }}
+ .bottom .tab-content {{ flex:1; min-height:0; overflow:auto; }}
+ .tbl {{ border-collapse:collapse; font-size:12px; margin:4px 0 12px; font-variant-numeric:tabular-nums; }}
+ .tbl th, .tbl td {{ padding:4px 10px; border-bottom:1px solid #24303a; text-align:right; white-space:nowrap; }}
+ .tbl th:first-child, .tbl td:first-child {{ text-align:left; }}
+ .tbl th {{ color:{MUTED}; font-weight:600; font-size:11px; }}
 </style></head>""")
 
 app.layout = html.Div(style={"display": "flex", "height": "100vh"}, children=[
@@ -357,12 +507,20 @@ app.layout = html.Div(style={"display": "flex", "height": "100vh"}, children=[
         section("Sensores",
                 html.Div([html.Span("todos", id="s-all", className="mini"),
                           html.Span("ninguno", id="s-none", className="mini")]),
-                dcc.Checklist(id="sensors", options=sensor_options, value=list(DS.sensors.keys()))),
+                # Con tracks cargados se arranca sin sensores: con todos y en modo acumulado cada paso
+                # del Play enviaba hasta 4 MB al navegador. Se pueden activar a mano.
+                html.Div("Con muchos sensores activos, usa la ventana deslizante para que el Play vaya fluido.",
+                         className="help", style={"marginBottom": "4px"})
+                if LAYER is not None and LAYER.runs else None,
+                dcc.Checklist(id="sensors", options=sensor_options,
+                              value=[] if LAYER is not None and LAYER.runs else list(DS.sensors.keys()))),
 
         section("Trayectorias de drones",
                 html.Div([html.Span("todos", id="d-all", className="mini"),
                           html.Span("ninguno", id="d-none", className="mini")]),
                 dcc.Checklist(id="drones", options=drone_options, value=list(DS.drones.keys()))),
+
+        _tracker_section(),
 
         section("Codificación de la confianza",
                 dcc.RadioItems(id="color-mode", value="sensor", options=[
@@ -405,6 +563,22 @@ app.layout = html.Div(style={"display": "flex", "height": "100vh"}, children=[
                        updatemode="drag", allow_direct_input=False)]),
         dcc.Graph(id="graph", style={"flex": "1", "minHeight": 0},
                   config={"displaylogo": False, "scrollZoom": True}),
+        html.Div(className="bottom", style={"display": "flex" if LAYER is not None and LAYER.runs else "none"},
+                 children=[
+            dcc.Tabs(id="cmp-tabs", value="plots", style={"height": "34px"}, children=[
+                dcc.Tab(label="Error y cobertura", value="plots",
+                        style={"padding": "6px", "background": PANEL, "color": MUTED, "border": "none"},
+                        selected_style={"padding": "6px", "background": BG, "color": TEXT, "border": "none"},
+                        children=[dcc.Graph(id="cmp-graph", style={"height": "290px"},
+                                            config={"displaylogo": False})]),
+                dcc.Tab(label="Resumen por dron" + (" · A vs B" if LAYER is not None and len(LAYER.runs) > 1 else ""),
+                        value="table",
+                        style={"padding": "6px", "background": PANEL, "color": MUTED, "border": "none"},
+                        selected_style={"padding": "6px", "background": BG, "color": TEXT, "border": "none"},
+                        children=[html.Div(_summary_children(), style={"padding": "6px 18px", "overflow": "auto",
+                                                                        "height": "290px"})]),
+            ]),
+        ]),
     ]),
 
     dcc.Interval(id="tick", interval=PLAY_TICK_MS, disabled=True),
@@ -457,19 +631,55 @@ def _player(_p, _r, _e, _n, playing, t, speed):
               Input("time", "value"), Input("sensors", "value"), Input("drones", "value"),
               Input("opts", "value"), Input("color-mode", "value"), Input("min-conf", "value"),
               Input("ray-len", "value"), Input("z-max", "value"), Input("play-mode", "value"),
-              Input("window", "value"),
+              Input("window", "value"), Input("tr-opts", "value"), Input("run", "value"),
               State("graph", "relayoutData"))
-def _update(t, sensors_on, drones_on, opts, color_mode, min_conf, ray_len, z_max, play_mode, window_s, relayout):
+def _update(t, sensors_on, drones_on, opts, color_mode, min_conf, ray_len, z_max, play_mode, window_s,
+            tr_opts, run_name, relayout):
     t = float(t or 0)
     opts = opts or []
     fig = build_figure(t, sensors_on or [], drones_on or [], opts, color_mode, min_conf or 0,
-                       ray_len or 1000, z_max or 500, play_mode, window_s, "agl" in opts)
+                       ray_len or 1000, z_max or 500, play_mode, window_s, "agl" in opts,
+                       tr_opts or [], run_name or "A")
     if relayout and "scene.camera" in relayout:
         fig.layout.scene.camera = relayout["scene.camera"]
     n_pts = sum(len(tr.x) for tr in fig.data
                 if tr.mode == "markers" and tr.x is not None and not tr.showlegend)
     clock = (T0 + pd.Timedelta(seconds=t)).strftime("%H:%M:%S")
     return fig, clock, f"{n_pts:,} detecciones visibles".replace(",", ".")
+
+
+_CMP_CACHE = {}
+
+
+def _now_shape(t):
+    x = (DS.t0 + pd.Timedelta(seconds=float(t or 0))).isoformat()
+    return {"type": "line", "xref": "x", "yref": "paper", "x0": x, "x1": x, "y0": 0, "y1": 1,
+            "line": {"color": TEXT, "width": 1}}
+
+
+@app.callback(Output("cmp-graph", "figure"), Input("time", "value"), Input("run", "value"))
+def _update_cmp(t, run_name):
+    """Panel inferior.
+
+    La figura completa solo se envía al cambiar de run (o al cargar). Al moverse el tiempo
+    se envía un parche con las shapes (la línea de "ahora"), no la figura entera:
+    reenviarla en cada paso del Play era lo que hacía ir lento al visor.
+    """
+    if LAYER is None or not LAYER.runs:
+        return go.Figure(layout=dict(paper_bgcolor=BG, plot_bgcolor=BG))
+    run_name = run_name or "A"
+    if run_name not in _CMP_CACHE:
+        _CMP_CACHE[run_name] = TL.comparison_figure(go, make_subplots, LAYER, run_name, DS, None, _drone_colors(),
+                                                    BG, TEXT, MUTED)
+    base = _CMP_CACHE[run_name]
+    shapes = [s.to_plotly_json() for s in base.layout.shapes] + [_now_shape(t)]
+    if ctx.triggered_id == "time":
+        patch = Patch()
+        patch["layout"]["shapes"] = shapes
+        return patch
+    fig = go.Figure(base)
+    fig.layout.shapes = shapes
+    return fig
 
 @app.callback(
     Output("sensors", "options"), Output("sensors", "value", allow_duplicate=True),
@@ -508,6 +718,9 @@ def _upload_csv(contents_list, filenames, current_sensors, current_drones):
 
     DS = build_dataset(list(sensors_dict.values()), list(drones_dict.values()))
     _refresh_globals()
+    # El origen del visor puede cambiar con los CSV nuevos: reproyectar tracks y etiquetas.
+    _load_layer()
+    _CMP_CACHE.clear()
 
     s_val = list(dict.fromkeys((current_sensors or []) + new_sensors))
     d_val = list(dict.fromkeys((current_drones or []) + new_drones))
