@@ -174,7 +174,7 @@ def _drone_colors():
 # Construcción de la figura
 # --------------------------------------------------------------------------- #
 def build_figure(t_now, sensors_on, drones_on, opts, color_mode, min_conf, ray_len,
-                 z_max, play_mode, window_s, use_agl, tr_opts=(), run_name="A"):
+                 z_max, play_mode, window_s, use_agl, tr_opts=(), run_name="A", ell_scale=1):
     fig = go.Figure()
     zc = "z_agl" if use_agl else "z_raw"
     show_rays = "rays" in opts
@@ -298,7 +298,8 @@ def build_figure(t_now, sensors_on, drones_on, opts, color_mode, min_conf, ray_l
         if "labels" in tr_opts:
             for tr in TL.label_traces(go, LAYER, t_now, t_lo, zc, z_max, _drone_colors()):
                 fig.add_trace(tr)
-        for tr in TL.track_traces(go, LAYER, run_name, t_now, t_lo, zc, z_max, list(tr_opts), DS, _drone_colors()):
+        for tr in TL.track_traces(go, LAYER, run_name, t_now, t_lo, zc, z_max, list(tr_opts), DS, _drone_colors(),
+                                  ell_scale):
             fig.add_trace(tr)
 
     ztitle = "Altura aprox. sobre terreno (m)" if use_agl else "Cota original (m)"
@@ -359,7 +360,8 @@ def _tracker_section():
             "Sin tracks cargados. Lanza con --interim (y --tracks) para ver las trayectorias estimadas, "
             "compararlas con las reales y colorear las detecciones por etiqueta.", className="help"),
             dcc.Checklist(id="tr-opts", options=[], value=[], style={"display": "none"}),
-            dcc.RadioItems(id="run", options=[{"label": "A", "value": "A"}], value="A", style={"display": "none"}))
+            dcc.RadioItems(id="run", options=[{"label": "A", "value": "A"}], value="A", style={"display": "none"}),
+            dcc.Dropdown(id="ell-scale", options=[{"label": "real", "value": 1}], value=1, style={"display": "none"}))
     runs = list(LAYER.runs)
     opts = []
     if runs:
@@ -369,7 +371,13 @@ def _tracker_section():
     if not LAYER.labelled.empty:
         opts.append({"label": "Detecciones coloreadas por etiqueta", "value": "labels"})
     children = [html.Div(f"Iteración {LAYER.split_group}", className="help", style={"marginBottom": "4px"}),
-                dcc.Checklist(id="tr-opts", options=opts, value=[o["value"] for o in opts if o["value"] in ("tracks", "errors")])]
+                dcc.Checklist(id="tr-opts", options=opts, value=[o["value"] for o in opts if o["value"] in ("tracks", "errors")]),
+                # La elipse 2σ real mide ~10 m: invisible en una escena de km. Se puede ampliar solo para verla.
+                html.Div([html.Span("Tamaño de la elipse", className="help", style={"marginRight": "8px"}),
+                          dcc.Dropdown(id="ell-scale", clearable=False, value=1, style={"width": "120px", "color": "#000"},
+                                       options=[{"label": "real", "value": 1}, {"label": "×5 (ampliada)", "value": 5},
+                                                {"label": "×10 (ampliada)", "value": 10}])],
+                         style={"display": "flex", "alignItems": "center", "marginTop": "4px"})]
     children.append(html.Div([html.Span("Run", className="help", style={"marginRight": "8px"}),
                               dcc.RadioItems(id="run", value=runs[0] if runs else "A", inline=True,
                                              options=[{"label": f" {r} ", "value": r} for r in runs] or
@@ -463,7 +471,7 @@ app.index_string = app.index_string.replace("</head>", f"""
  .sidebar label, .sidebar label span {{ color:{TEXT} !important; }}
  .sidebar .sub {{ color:{MUTED} !important; }}
  .dash-slider-mark, .rc-slider-mark-text, [class*="mark"] {{ color:{MUTED} !important; font-size:10px; }}
- .bottom {{ height:330px; min-height:330px; border-top:1px solid #24303a; display:flex; flex-direction:column; }}
+ .bottom {{ height:420px; min-height:420px; border-top:1px solid #24303a; display:flex; flex-direction:column; }}
  .bottom .tab-content {{ flex:1; min-height:0; overflow:auto; }}
  .tbl {{ border-collapse:collapse; font-size:12px; margin:4px 0 12px; font-variant-numeric:tabular-nums; }}
  .tbl th, .tbl td {{ padding:4px 10px; border-bottom:1px solid #24303a; text-align:right; white-space:nowrap; }}
@@ -569,14 +577,14 @@ app.layout = html.Div(style={"display": "flex", "height": "100vh"}, children=[
                 dcc.Tab(label="Error y cobertura", value="plots",
                         style={"padding": "6px", "background": PANEL, "color": MUTED, "border": "none"},
                         selected_style={"padding": "6px", "background": BG, "color": TEXT, "border": "none"},
-                        children=[dcc.Graph(id="cmp-graph", style={"height": "290px"},
+                        children=[dcc.Graph(id="cmp-graph", style={"height": "380px"},
                                             config={"displaylogo": False})]),
                 dcc.Tab(label="Resumen por dron" + (" · A vs B" if LAYER is not None and len(LAYER.runs) > 1 else ""),
                         value="table",
                         style={"padding": "6px", "background": PANEL, "color": MUTED, "border": "none"},
                         selected_style={"padding": "6px", "background": BG, "color": TEXT, "border": "none"},
                         children=[html.Div(_summary_children(), style={"padding": "6px 18px", "overflow": "auto",
-                                                                        "height": "290px"})]),
+                                                                        "height": "380px"})]),
             ]),
         ]),
     ]),
@@ -631,15 +639,15 @@ def _player(_p, _r, _e, _n, playing, t, speed):
               Input("time", "value"), Input("sensors", "value"), Input("drones", "value"),
               Input("opts", "value"), Input("color-mode", "value"), Input("min-conf", "value"),
               Input("ray-len", "value"), Input("z-max", "value"), Input("play-mode", "value"),
-              Input("window", "value"), Input("tr-opts", "value"), Input("run", "value"),
+              Input("window", "value"), Input("tr-opts", "value"), Input("run", "value"), Input("ell-scale", "value"),
               State("graph", "relayoutData"))
 def _update(t, sensors_on, drones_on, opts, color_mode, min_conf, ray_len, z_max, play_mode, window_s,
-            tr_opts, run_name, relayout):
+            tr_opts, run_name, ell_scale, relayout):
     t = float(t or 0)
     opts = opts or []
     fig = build_figure(t, sensors_on or [], drones_on or [], opts, color_mode, min_conf or 0,
                        ray_len or 1000, z_max or 500, play_mode, window_s, "agl" in opts,
-                       tr_opts or [], run_name or "A")
+                       tr_opts or [], run_name or "A", ell_scale or 1)
     if relayout and "scene.camera" in relayout:
         fig.layout.scene.camera = relayout["scene.camera"]
     n_pts = sum(len(tr.x) for tr in fig.data

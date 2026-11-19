@@ -117,8 +117,12 @@ def load_layer(ds, t0, interim: str, split_group: str, tracks_paths: dict, cfg=N
 
 
 def track_traces(go, layer: TrackLayer, run_name: str, t_now: float, t_lo: float, zc: str, z_max: float,
-                 opts: list, ds, drone_colors: dict):
-    """Trazas 3D: tracks estimados, líneas de error real↔estimado y elipses 2σ."""
+                 opts: list, ds, drone_colors: dict, ell_scale: float = 1.0):
+    """Trazas 3D: tracks estimados, líneas de error real↔estimado y elipses 2σ.
+
+    `ell_scale` amplía la elipse solo para verla (radio 2σ típico ~10 m en escenas de ~3 km);
+    la leyenda indica la ampliación para no confundirla con la incertidumbre real.
+    """
     traces = []
     run = layer.runs.get(run_name)
     if run is None:
@@ -148,17 +152,22 @@ def track_traces(go, layer: TrackLayer, run_name: str, t_now: float, t_lo: float
     now = now.sort_values("ts").drop_duplicates("track_id", keep="last")
 
     if "ellipse" in opts and len(now):
-        xs, ys, zs = [], [], []
+        scale = float(ell_scale or 1.0)
+        xs, ys, zs, txt = [], [], [], []
         for row in now.itertuples():
             pts = horizontal_ellipse(row.C_nn, row.C_ne, row.C_ee, k=2.0)
             if not len(pts):
                 continue
+            real = float(np.abs(pts).max())
+            pts = pts * scale
             z = min(getattr(row, zc) if pd.notna(getattr(row, zc)) else 0, z_max)
             xs += list(row.ve + pts[:, 1]) + [None]
             ys += list(row.vn + pts[:, 0]) + [None]
             zs += [z] * len(pts) + [None]
-        traces.append(go.Scatter3d(x=xs, y=ys, z=zs, mode="lines", line=dict(color="#ffe066", width=2),
-                                   opacity=0.7, name="Incertidumbre 2σ", hoverinfo="skip"))
+            txt += [f"Track …{row.track_id[-6:]} · semieje mayor 2σ real: {real:.0f} m"] * len(pts) + [None]
+        label = "Incertidumbre 2σ" + ("" if scale == 1 else f" (dibujada ×{scale:g})")
+        traces.append(go.Scatter3d(x=xs, y=ys, z=zs, mode="lines", line=dict(color="#ffe066", width=3),
+                                   opacity=0.8, name=label, text=txt, hovertemplate="%{text}<extra></extra>"))
 
     if "errors" in opts and run.compare:
         pairs = run.compare["pairs"]
@@ -215,8 +224,9 @@ def comparison_figure(go, make_subplots, layer: TrackLayer, run_name: str, ds, t
                       bg: str, text: str, muted: str):
     """Panel inferior: error vs tiempo, cobertura por dron (qué track lo sigue) y tracks falsos."""
     run = layer.runs.get(run_name)
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.06, row_heights=[0.45, 0.4, 0.15],
-                        subplot_titles=("Error real↔estimado por dron (m)", "Cobertura: qué track sigue a cada dron",
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.38, 0.47, 0.15],
+                        subplot_titles=("Error real↔estimado por dron (m)",
+                                        "Cobertura: barra de color = seguido por ese track · franja roja = sin track",
                                         "Tracks falsos por instante"))
     if run is None or not run.compare:
         fig.add_annotation(text="Sin GT o sin tracks para esta iteración", showarrow=False, x=0.5, y=0.5,
@@ -227,9 +237,21 @@ def comparison_figure(go, make_subplots, layer: TrackLayer, run_name: str, ds, t
         missed = run.compare["missed"].copy()
         inst = run.compare["instants"].copy()
         to_t = lambda s: pd.to_datetime(s, unit="ms")  # UTC sin zona, como el visor
-        keys = sorted(set(pairs.drone_key) | set(missed.drone_key))
+        keys = sorted(set(pairs.drone_key) | set(missed.drone_key), key=lambda k: layer.gt_view.get(k, k))
+        views = [layer.gt_view.get(k, k) for k in keys]
+
+        def spans(ts: pd.Series):
+            """Agrupa segundos consecutivos en tramos (inicio, fin)."""
+            ts = ts.sort_values().to_numpy()
+            if not len(ts):
+                return []
+            cut = np.where(np.diff(ts) > 1500)[0]
+            starts = np.r_[ts[0], ts[cut + 1]]
+            ends = np.r_[ts[cut], ts[-1]]
+            return list(zip(starts, ends + 1000))
+
         for i, key in enumerate(keys):
-            view = layer.gt_view.get(key, key)
+            view = views[i]
             col = drone_colors.get(view, "#cccccc")
             p = pairs[pairs.drone_key == key].sort_values("ts_ms")
             if len(p):
@@ -239,22 +261,27 @@ def comparison_figure(go, make_subplots, layer: TrackLayer, run_name: str, ds, t
                                          name=view, legendgroup=view, connectgaps=False,
                                          hovertemplate=f"{view}<br>%{{x|%H:%M:%S}} · %{{y:.1f}} m<extra></extra>"),
                               row=1, col=1)
-            # Cobertura: barra por segmento continuo con el mismo track.
+            # Primero los huecos (franja roja fina y translúcida), encima las barras de los tracks.
+            xs, ys = [], []
+            for a, b in spans(missed[missed.drone_key == key].ts_ms):
+                xs += [to_t(a), to_t(b), None]
+                ys += [i, i, None]
+            if xs:
+                fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color="rgba(255,92,92,0.45)", width=4),
+                                         showlegend=False, hovertemplate=f"{view}: sin track<extra></extra>"),
+                              row=2, col=1)
             if len(p):
                 seg = (p.track_id != p.track_id.shift()) | (p.ts_ms.diff() > 1500)
                 p = p.assign(seg=seg.cumsum())
                 for _, s in p.groupby("seg"):
                     tid = s.track_id.iloc[0]
                     fig.add_trace(go.Scatter(
-                        x=[to_t(s.ts_ms.iloc[0]), to_t(s.ts_ms.iloc[-1] + 1000)], y=[view, view], mode="lines",
-                        line=dict(color=run.colors.get(tid, col), width=10), showlegend=False,
+                        x=[to_t(s.ts_ms.iloc[0]), to_t(s.ts_ms.iloc[-1] + 1000)], y=[i, i], mode="lines",
+                        line=dict(color=run.colors.get(tid, col), width=11), showlegend=False,
                         hovertemplate=f"{view}<br>Track …{tid[-6:]}<br>%{{x|%H:%M:%S}}<extra></extra>"), row=2, col=1)
-            m = missed[missed.drone_key == key]
-            if len(m):
-                fig.add_trace(go.Scatter(x=to_t(m.ts_ms), y=[view] * len(m), mode="markers",
-                                         marker=dict(symbol="line-ns-open", size=8, color="#ff5c5c"),
-                                         showlegend=False, hovertemplate=f"{view}: sin track<br>%{{x|%H:%M:%S}}<extra></extra>"),
-                              row=2, col=1)
+        # Todas las filas con su nombre (con ejes categóricos Plotly ocultaba algunas).
+        fig.update_yaxes(tickmode="array", tickvals=list(range(len(views))), ticktext=views,
+                         range=[-0.6, len(views) - 0.4], showgrid=False, row=2, col=1)
         fig.add_hline(y=c, line=dict(color=muted, dash="dot", width=1), row=1, col=1,
                       annotation_text=f"corte GOSPA {c:.0f} m", annotation_font_color=muted)
         fig.add_trace(go.Scatter(x=to_t(inst.ts_ms), y=inst.n_false, mode="lines", line=dict(color="#ffb347", width=1),
@@ -264,8 +291,11 @@ def comparison_figure(go, make_subplots, layer: TrackLayer, run_name: str, ds, t
         fig.add_vline(x=ds.t0 + pd.Timedelta(seconds=t_now), line=dict(color=text, width=1))
     axis = dict(gridcolor="#2a3540", zerolinecolor="#3a4855", color=muted)
     fig.update_layout(paper_bgcolor=bg, plot_bgcolor=bg, font=dict(color=text, size=11),
-                      margin=dict(l=110, r=20, t=24, b=24), uirevision="cmp",
-                      legend=dict(orientation="h", y=1.08, x=0, font=dict(size=10)), hovermode="closest")
+                      margin=dict(l=120, r=150, t=28, b=24), uirevision="cmp",
+                      # Leyenda a la derecha: arriba se pisaba con el título del primer gráfico.
+                      legend=dict(orientation="v", x=1.01, xanchor="left", y=1, yanchor="top", font=dict(size=10),
+                                  title=dict(text="Error por dron", font=dict(size=10, color=muted))),
+                      hovermode="closest")
     fig.update_xaxes(axis)
     fig.update_yaxes(axis)
     fig.update_annotations(font=dict(size=11, color=muted))
