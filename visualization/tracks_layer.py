@@ -48,7 +48,8 @@ def infer_split_group(iteration_dir: str) -> str | None:
     it = re.search(r"Iteration\s*(\d+)", path)
     if not (sc and it):
         return None
-    if "Testing" in path:
+    # Vale para la estructura del reto ("Testing datasets/…") y la del repo ("data/raw/test/…").
+    if "Testing" in path or re.search(r"/test/", path, re.IGNORECASE):
         return f"test:S{sc.group(1)}:I{it.group(1)}"
     ds = re.search(r"Dataset\s*([IVX]+)", path)
     return f"eval:Dataset_{ds.group(1)}:S{sc.group(1)}:I{it.group(1)}" if ds else None
@@ -60,6 +61,7 @@ class Run:
     tracks: pd.DataFrame                    # 1 fila por (track, segundo) en coords del visor
     colors: dict = field(default_factory=dict)
     compare: dict = field(default_factory=dict)  # tablas de src.compare (vacío si no hay GT)
+    durations: pd.Series = field(default_factory=pd.Series)  # duración de cada track (s)
 
 
 @dataclass
@@ -85,13 +87,14 @@ def _load_run(name, path, group, origins, gt, ds, t0, cfg) -> Run:
     tracks = tracks[tracks.split_group == group].copy()
     tracks["track_id"] = tracks.track_id.astype(str)
     compare = run_compare(tracks, gt, cfg) if len(gt) and len(tracks) else {}
+    durations = (tracks.groupby("track_id").ts_ms.agg(lambda x: x.max() - x.min()) / 1000.0) if len(tracks)         else pd.Series(dtype=float)
     # Para dibujar basta 1 punto por segundo y track.
     tracks["sec"] = tracks.ts_ms // 1000
     draw = tracks.sort_values("ts_ms").drop_duplicates(["track_id", "sec"])
     draw = _to_view(add_geodetic(draw, origins), ds, t0)
     ids = sorted(draw.track_id.unique())
     colors = {tid: TRACK_COLORS[i % len(TRACK_COLORS)] for i, tid in enumerate(ids)}
-    return Run(name=name, tracks=draw, colors=colors, compare=compare)
+    return Run(name=name, tracks=draw, colors=colors, compare=compare, durations=durations)
 
 
 def load_layer(ds, t0, interim: str, split_group: str, tracks_paths: dict, cfg=None) -> TrackLayer:
@@ -120,7 +123,7 @@ def load_layer(ds, t0, interim: str, split_group: str, tracks_paths: dict, cfg=N
 
 
 def track_traces(go, layer: TrackLayer, run_name: str, t_now: float, t_lo: float, zc: str, z_max: float,
-                 opts: list, ds, drone_colors: dict, ell_scale: float = 1.0):
+                 opts: list, ds, drone_colors: dict, ell_scale: float = 1.0, min_dur: float = 0.0):
     """Trazas 3D: tracks estimados, líneas de error real↔estimado y elipses 2σ.
 
     `ell_scale` amplía la elipse solo para verla (radio 2σ típico ~10 m en escenas de ~3 km);
@@ -130,7 +133,11 @@ def track_traces(go, layer: TrackLayer, run_name: str, t_now: float, t_lo: float
     run = layer.runs.get(run_name)
     if run is None:
         return traces
-    d = run.tracks[(run.tracks.ts <= t_now) & (run.tracks.ts >= t_lo)]
+    # Filtro de duración mínima: oculta los tracks cortos (suelen ser ruido) para ver qué quedaría
+    # si el postfiltro los eliminara. Solo afecta a lo que se dibuja, no a las métricas.
+    keep = set(run.durations[run.durations >= float(min_dur or 0)].index)
+    tracks_all = run.tracks[run.tracks.track_id.isin(keep)]
+    d = tracks_all[(tracks_all.ts <= t_now) & (tracks_all.ts >= t_lo)]
     if "tracks" in opts:
         for tid, g in d.groupby("track_id"):
             col = run.colors[tid]
@@ -147,11 +154,11 @@ def track_traces(go, layer: TrackLayer, run_name: str, t_now: float, t_lo: float
                 traces.append(go.Scatter3d(
                     x=[last.ve], y=[last.vn], z=[min(last[zc] if pd.notna(last[zc]) else 0, z_max)],
                     mode="markers", marker=dict(size=6, color=col, symbol="diamond-open", line=dict(width=2)),
-                    showlegend=False, hoverinfo="skip"))
+                    showlegend=False, hoverinfo="skip", meta="tracker"))
         traces.append(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", name=f"Tracks estimados ({run_name})",
                                    line=dict(color="#ffe066", width=3, dash="dash"), legendgroup="tracks"))
 
-    now = run.tracks[(run.tracks.ts <= t_now) & (run.tracks.ts > t_now - 1.5)]
+    now = tracks_all[(tracks_all.ts <= t_now) & (tracks_all.ts > t_now - 1.5)]
     now = now.sort_values("ts").drop_duplicates("track_id", keep="last")
 
     if "ellipse" in opts and len(now):

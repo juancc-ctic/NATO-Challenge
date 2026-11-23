@@ -40,6 +40,21 @@ Panel inferior:
 - **Error y cobertura**: error en metros por dron a lo largo del tiempo (con el corte GOSPA), qué track sigue a cada dron (cada color de barra es un track; las marcas rojas son segundos sin track) y tracks falsos por instante. La línea vertical es el instante del reproductor.
 - **Resumen por dron**: % del tiempo seguido, error medio y p90, tracks usados, cambios de track y retraso hasta el primer track; GOSPA de la iteración desglosado. Con dos runs, tabla A → B en verde/rojo.
 
+### Selector de iteración
+
+Si se lanza con `--iteration`, el panel lateral muestra un desplegable **Iteración** con todas las iteraciones de la misma carpeta de datos (test y eval). Al cambiar, recarga sensores, drones, tracks, etiquetas y Excel sin relanzar (~10 s; la primera vez que se abre una iteración, ~13 s más por leer su Excel, que luego queda en caché). La carpeta raíz se deduce de `--iteration`; se puede fijar con `--data-root ../data/raw`.
+
+### Excel de entrega
+
+Sección **Excel de entrega**: carga el Excel que genera `python -m src.cli submit` para esa iteración (busca en `<repo>/out/` un fichero con el mismo nombre que su plantilla; otra carpeta con `--submission`). Es lo que se envía y por lo que nos puntúan.
+
+- **Pintar el Excel de entrega**: dibuja sus tracks como líneas rosas; el hover muestra clase e identidad tal cual van en el fichero.
+- **Comprobaciones** automáticas (✔ / ! / ✖): cabecera de 19 columnas en orden, rejilla de 100 ms sin saltos, filas con track con lat/lon, covarianzas válidas, clase e identidad con valores admitidos, % relleno (≠ Unknown), posiciones en la zona y que coincide con `tracks.parquet` (verifica la conversión ENU → WGS84).
+
+### Ocultar tracks cortos
+
+Deslizador **Ocultar tracks de menos de (s)** en "Tracker y comparación": oculta los tracks que duran menos que el umbral (suelen ser ruido) para ver qué quedaría si el postfiltro los eliminara. Solo afecta a lo que se dibuja; las métricas siguen usando todos los tracks. El contador de arriba indica cuántos se muestran ("8 de 26 tracks (≥ 30 s)").
+
 Coordenadas: el visor proyecta con su propio origen y el tracker usa el del ETL (`origins.json`). Los tracks se pasan a lat/lon con su origen y se reproyectan con el del visor, así que no hay desplazamiento entre capas. Los cálculos de la comparación están en [`src/compare.py`](../src/compare.py) (mismo criterio que GOSPA del evaluador).
 
 Para compartir sin lanzar el visor, el mismo análisis en HTML para todas las iteraciones de test:
