@@ -1,11 +1,12 @@
-"""Calibra el sigma de posición con ground truth de `test`.
+"""Calibra los sigma de medida con ground truth de `test`.
 
-Empareja detecciones de posición con GT por timestamp (Húngaro, ≤500 m) y
-calcula, por tipo de sensor y eje: mediana del error, sigma robusto (MAD) y RMS.
-El sigma robusto es la base de `etl.default_sigma_m`; no se ajusta con GOSPA.
+Fuentes:
+- `reports/labels/sensors.csv` (etiquetado de Cayetana): error mediano por sensor
+  e iteración para detecciones emparejadas. Se usa para sigma horizontal y azimut.
+- Emparejamiento propio Húngaro ≤500 m: se usa para sigma vertical (`u`), que el
+  etiquetado no separa.
 
-Uso: `python scripts/calibrate_sigma.py`
-Salida: `reports/sigma_calibration.csv`
+No se ajusta con GOSPA. Salida: `reports/sigma_calibration.csv`.
 """
 from __future__ import annotations
 
@@ -23,6 +24,10 @@ from src.config import load_config
 
 MAX_MATCH_M = 500.0
 MAD_TO_SIGMA = 1.4826
+# Mediana de |error| para una Gaussiana 1D: 0.6745·σ.
+MEDIAN_ABS_TO_SIGMA = 0.6745
+# Mediana de la distancia horizontal (Rayleigh 2D): 1.1774·σ.
+RAYLEIGH_MEDIAN_TO_SIGMA = 1.1774
 
 
 def _interpolate_gt(
@@ -60,13 +65,12 @@ def _matched_errors(
             ground_truth[ground_truth["split_group"] == split_group],
             timestamps,
         )
-        positions_by_time = {
-            int(ts): frame[["n", "e", "u"]].to_numpy(dtype=float)
-            for ts, frame in group.groupby("ts_ms", sort=False)
-        }
         rows_by_time = {
-            int(ts): frame
-            for ts, frame in group.groupby("ts_ms", sort=False)
+            int(ts): frame for ts, frame in group.groupby("ts_ms", sort=False)
+        }
+        positions_by_time = {
+            ts: frame[["n", "e", "u"]].to_numpy(dtype=float)
+            for ts, frame in rows_by_time.items()
         }
         for index, timestamp in enumerate(timestamps):
             gt_positions = gt_matrix[index]
@@ -88,8 +92,7 @@ def _matched_errors(
             gt_index = gt_index[keep]
             if len(track_index) == 0:
                 continue
-            frame = rows_by_time[int(timestamp)]
-            matched = frame.iloc[track_index].copy()
+            matched = rows_by_time[int(timestamp)].iloc[track_index].copy()
             errors = detections_at_ts[track_index] - gt_positions[gt_index]
             matched["dn"] = errors[:, 0]
             matched["de"] = errors[:, 1]
@@ -100,48 +103,56 @@ def _matched_errors(
     return pd.concat(output, ignore_index=True)
 
 
-def _summarise(matched: pd.DataFrame) -> pd.DataFrame:
+def _matched_sigma(matched: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for sensor_type, group in matched.groupby("sensor_type", sort=False):
+        row: dict[str, object] = {"sensor_type": sensor_type}
         for axis in ("n", "e", "u"):
             errors = group[f"d{axis}"].to_numpy(dtype=float)
             errors = errors[np.isfinite(errors)]
             if len(errors) == 0:
                 continue
             median = float(np.median(errors))
-            mad_sigma = float(
+            row[f"mad_sigma_{axis}_m"] = float(
                 MAD_TO_SIGMA * np.median(np.abs(errors - median))
             )
-            rms = float(np.sqrt(np.mean(errors**2)))
-            reported_rows = group[
-                group["sigma_source"].isin(
-                    ["reported_m", "reported_deg_converted"]
-                )
-            ]
-            reported = reported_rows[f"sigma_{axis}"].to_numpy(dtype=float)
-            reported = reported[np.isfinite(reported)]
-            reported_errors = reported_rows[f"d{axis}"].to_numpy(dtype=float)
-            reported_errors = reported_errors[np.isfinite(reported_errors)]
+            row[f"rms_{axis}_m"] = float(np.sqrt(np.mean(errors**2)))
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _labels_sigma(sensors_path: Path) -> pd.DataFrame:
+    if not sensors_path.exists():
+        return pd.DataFrame()
+    sensors = pd.read_csv(sensors_path).dropna(subset=["mode"])
+    bearing_types = {"rf", "acoustic", "camera"}
+    rows: list[dict[str, object]] = []
+    for sensor_type in sorted(sensors["sensor_type"].unique()):
+        preferred = "brg" if sensor_type in bearing_types else "pos"
+        group = sensors[
+            (sensors["sensor_type"] == sensor_type)
+            & (sensors["mode"] == preferred)
+        ]
+        if group.empty:
+            group = sensors[sensors["sensor_type"] == sensor_type]
+            preferred = str(group["mode"].iloc[0])
+        median = float(np.median(group["err_median"].dropna()))
+        if preferred == "pos":
             rows.append(
                 {
                     "sensor_type": sensor_type,
-                    "axis": axis,
-                    "n_matched": int(len(errors)),
-                    "median_error_m": median,
-                    "mad_sigma_m": mad_sigma,
-                    "rms_m": rms,
-                    "n_reported": int(len(reported)),
-                    "reported_median_m": (
-                        float(np.median(reported)) if len(reported) else np.nan
-                    ),
-                    "nis_reported": (
-                        float(
-                            np.mean(reported_errors**2)
-                            / np.median(reported) ** 2
-                        )
-                        if len(reported) and len(reported_errors)
-                        else np.nan
-                    ),
+                    "mode": preferred,
+                    "sigma_h_m": median / RAYLEIGH_MEDIAN_TO_SIGMA,
+                    "sigma_az_deg": np.nan,
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "sensor_type": sensor_type,
+                    "mode": preferred,
+                    "sigma_h_m": np.nan,
+                    "sigma_az_deg": median / MEDIAN_ABS_TO_SIGMA,
                 }
             )
     return pd.DataFrame(rows)
@@ -160,10 +171,6 @@ def main() -> int:
             "n",
             "e",
             "u",
-            "sigma_n",
-            "sigma_e",
-            "sigma_u",
-            "sigma_source",
         ],
     )
     ground_truth = pd.read_parquet(cfg.interim / "ground_truth.parquet")
@@ -175,10 +182,45 @@ def main() -> int:
         ground_truth["split_group"].isin(detections["split_group"].unique())
     ]
     matched = _matched_errors(detections, ground_truth)
-    summary = _summarise(matched)
+    matched_sigma = _matched_sigma(matched)
+    labels_sigma = _labels_sigma(cfg.reports / "labels" / "sensors.csv")
+
+    rows: list[dict[str, object]] = []
+    sensor_types = set(matched_sigma.get("sensor_type", [])) | set(
+        labels_sigma.get("sensor_type", [])
+    )
+    for sensor_type in sorted(sensor_types):
+        m = matched_sigma[matched_sigma["sensor_type"] == sensor_type]
+        l = labels_sigma[labels_sigma["sensor_type"] == sensor_type]
+        mode = "brg" if sensor_type in {"rf", "acoustic", "camera"} else "pos"
+        row: dict[str, object] = {"sensor_type": sensor_type, "mode": mode}
+        if mode == "pos":
+            if len(l) and np.isfinite(l.iloc[0]["sigma_h_m"]):
+                row["sigma_n_m"] = float(l.iloc[0]["sigma_h_m"])
+                row["sigma_e_m"] = float(l.iloc[0]["sigma_h_m"])
+                row["basis_h"] = "labels_median"
+            elif len(m):
+                row["sigma_n_m"] = float(m.iloc[0]["mad_sigma_n_m"])
+                row["sigma_e_m"] = float(m.iloc[0]["mad_sigma_e_m"])
+                row["basis_h"] = "hungarian_mad"
+            row["sigma_u_m"] = (
+                float(m.iloc[0]["mad_sigma_u_m"]) if len(m) else np.nan
+            )
+            row["sigma_az_deg"] = np.nan
+        else:
+            row["sigma_n_m"] = np.nan
+            row["sigma_e_m"] = np.nan
+            row["sigma_u_m"] = np.nan
+            row["sigma_az_deg"] = (
+                float(l.iloc[0]["sigma_az_deg"]) if len(l) else np.nan
+            )
+            row["basis_h"] = "labels_median" if len(l) else "none"
+        rows.append(row)
+
+    summary = pd.DataFrame(rows).round(3)
     output = cfg.reports / "sigma_calibration.csv"
     summary.to_csv(output, index=False)
-    print(summary.round(3).to_string(index=False))
+    print(summary.to_string(index=False))
     print(f"\nEscrito: {output}")
     return 0
 

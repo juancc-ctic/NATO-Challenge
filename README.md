@@ -281,9 +281,9 @@ $$
 
 Si falta `u`, se usa la variante 2D: `H` es $2\times6$ y `R` es $2\times2$.
 
-`z` es la posición medida por el sensor en ENU; `H` selecciona las componentes de posición del estado $[n,e,u,v_n,v_e,v_u]$; `R` es la covarianza del ruido de medida. Los $\sigma_n,\sigma_e,\sigma_u$ se calculan en el ETL (`_sigma`) **por detección**, no por `sensor_id`: si la fila trae `location_yError`, `location_xError` y `location_zError` positivos se usan como metros; en `cyber`, si `xError`/`yError` vienen en grados (<0.01), se convierten con $\sigma_n = yError \cdot 110540$ y $\sigma_e = xError \cdot 111320 \cdot \cos(lat)$ (`location_zError` se usa en metros sin convertir). Si falta una componente, se rellena con `default_sigma_m` por tipo y eje, calibrado con `1.4826·MAD` del error GT→detección (radar 150/154/65, cyber 41/38/30, fusion 29/31/18, other 5/7/2 m; `scripts/calibrate_sigma.py`). Un $\sigma$ reportado en el tope (5000 m) se trata como placeholder. Después todo se recorta a `[sigma_floor_m=0.5, sigma_cap_m=5000]` m. No hay un $\sigma$ por sensor individual. En los datos, 317 997 detecciones traen $\sigma$ reportado (radar $\sigma_n\approx128$, $\sigma_e\approx177$, $\sigma_u\approx196$ m de mediana; `other` 9–12 m; 49 cyber convertidas de grados), 173 123 usan default y 32 011 solo-azimut no tienen $\sigma$ de posición.
+`z` es la posición medida por el sensor en ENU; `H` selecciona las componentes de posición del estado; `R` es la covarianza del ruido de medida. Los $\sigma_n,\sigma_e,\sigma_u$ salen del error que reporta cada detección (`location_*Error`). Si falta, usamos un valor por tipo y eje calibrado con detecciones de `test` emparejadas al GT (`reports/labels/sensors.csv`), no ajustado a GOSPA. En `cyber`, si `xError`/`yError` vienen en grados, se convierten con $\sigma_n = yError \cdot 110540$ y $\sigma_e = xError \cdot 111320 \cdot \cos(lat)$ (`location_zError` se usa en metros); los valores en el tope (5000 m) se tratan como no reportados. Todo se recorta a `[0.5, 5000]` m. No hay un $\sigma$ por sensor individual: si llegan sensores nuevos, hay que recalibrar.
 
-Para sensores solo-azimut (`rf`, `acústico`, `cámara`) (i.e. que reportan la dirección (azimut, a veces elevación) y la posición del sensor, pero no la distancia al dron):
+Para sensores solo-azimut (`rf`, `acústico`, `cámara`) la medida es el ángulo:
 
 $$
 h(x) = \operatorname{atan2}(e - e_s, n - n_s)
@@ -295,13 +295,9 @@ H = \left[-\frac{\Delta e}{r^2}, \frac{\Delta n}{r^2}, 0, 0, 0, 0\right],
 R = [\sigma_{az}^2]
 $$
 
-con $\Delta n = n - n_s$, $\Delta e = e - e_s$, $r^2 = \Delta n^2 + \Delta e^2$. La fila es perpendicular a la línea de visión: el azimut no da distancia.
+con $\Delta n = n - n_s$, $\Delta e = e - e_s$, $r^2 = \Delta n^2 + \Delta e^2$. La corrección es perpendicular a la línea de visión: ajusta la dirección, no la distancia. En el baseline no crean tracks; solo actualizan tracks ya existentes. Probamos crear tracks solo-azimut con un rango previo y empeoró GOSPA, así que queda desactivado (`initiate_from_bearing`).
 
-Estos sensores aportan azimut, a veces elevación, y la posición del sensor, pero no rango ni posición 3D del dron. Para tratarlos en 3D como el resto faltaría una distancia (o posición) que no está en los datos; por eso se usan como medidas 2D de rumbo que actualizan la dirección pero no la distancia. En el baseline no inician tracks y necesitan sensores de posición o movimiento (paralaje) para que la distancia sea observable, asumiendo que `σ_az` es un default por tipo, no una incertidumbre reportada.
-
-**Solo-azimut implementado y descartado como mejora.** Está detrás de `tracker.lifecycle.initiate_from_bearing` (por defecto `false`). Inicia un track 3D con un prior de rango (`bearing_init_range_m`, `bearing_init_range_sigma_m`) y de altitud (`bearing_init_altitude_m`), exige `bearing_init_min_bearings` bearings coherentes en `bearing_init_window_s` con `bearing_init_angle_deg`, y lo mantiene con el EKF de azimut usando residuo angular envuelto a `[-π, π]`. En folds de `test` empeoró GOSPA frente al baseline anterior, así que se mantiene desactivado. Evidencia en `reports/bearing_only/`. Los tracks de posición conservan el residuo antiguo `z - H x^-` para no alterar el baseline; solo los tracks solo-azimut usan el residuo corregido.
-
-`σ_az` no existe en la BD. Se toma de `tracker.measurement.sigma_az_deg` por tipo (`rf: 5°`, `acústico: 10°`, `cámara: 1°`); son defaults **no calibrados**, pendientes de ajustar con residuos.
+`σ_az` no existe en la BD. Se toma de `tracker.measurement.sigma_az_deg`, calibrado con el error angular de las detecciones etiquetadas (`rf` 10°, acústico 3.5°, cámara 0.6°).
 
 ### Gating: $S$ (covarianza de la innovación) y $d^2$ (distancia de Mahalanobis)
 
@@ -426,17 +422,17 @@ La métrica principal interna es **`GOSPA(c=50 m, p=2)`**. Con `c=50`, cada GT n
 
 `python scripts/diagnose_tracking.py` escribe `reports/tracking_diagnostics.csv` y `.json` con GOSPA `c=50`/`c=100`, descomposición, cobertura, duplicados y vida de tracks. No toca el tracker ni `config.yaml`.
 
-**Baseline actual** (hash `f4a7d0e7d187b1b6`):
+**Baseline actual** (hash `230fd13107951daf`):
 
 | Grupo | GOSPA c=50 | GOSPA c=100 | Recall c=50 | Falsos c=50 | ID switches |
 |---|---:|---:|---:|---:|---:|
-| S1:I1 | 74.6 | 139.8 | 0.198 | 0.593 | 6 |
-| S2:I2 | 86.4 | 164.9 | 0.136 | 0.793 | 10 |
-| S3:I1 | 89.0 | 175.4 | 0.039 | 0.901 | 5 |
-| S3:I2 | 91.2 | 175.8 | 0.075 | 0.889 | 11 |
-| S3:I3 | 80.4 | 155.0 | 0.102 | 0.889 | 18 |
-| S4:I4 | 107.7 | 205.5 | 0.086 | 0.875 | 15 |
-| **Media** | **88.2** | **169.4** | **0.106** | **0.823** | — |
+| S1:I1 | 73.1 | 136.3 | 0.239 | 0.560 | 6 |
+| S2:I2 | 85.2 | 161.0 | 0.129 | 0.786 | 16 |
+| S3:I1 | 90.7 | 178.5 | 0.045 | 0.905 | 4 |
+| S3:I2 | 91.5 | 177.3 | 0.079 | 0.888 | 11 |
+| S3:I3 | 79.7 | 153.6 | 0.086 | 0.896 | 13 |
+| S4:I4 | 106.4 | 200.7 | 0.087 | 0.865 | 11 |
+| **Media** | **87.8** | **167.9** | **0.111** | **0.817** | — |
 
 La descomposición completa (RMSE, GT/ts, tracks/ts, missed/ts, false/ts) está en `reports/tracking_diagnostics.csv`; no se repite aquí.
 
@@ -446,7 +442,7 @@ La métrica `c=50` es la principal. El baseline a `c=100` queda solo como refere
 
 - Cobertura GT→detección de posición: 16–39 % a ≤50 m y 28–54 % a ≤100 m; precisión de detección a ≤50 m: 1–14 %. El detalle por grupo está en `reports/tracking_diagnostics.csv`.
 - Solo-azimut: 0–88 % del GT tiene un bearing a ≤5°, pero solo 0–5 % tiene ≥2 sensores; la triangulación simultánea no es viable.
-- Tracks: ~800 IDs emitidos, mediana de vida 45–339 muestras; ~99 % `coast` y <1 % `confirmed`; no se emiten `tentative`.
+- Tracks: ~500 IDs emitidos, mediana de vida 82–380 muestras; ~99.6 % `coast` y <0.5 % `confirmed`; no se emiten `tentative`.
 - Duplicados: 65 196 copias extra detectadas; el ETL ya las reduce a 161.
 - Altitud: GT `u` 3–123 m; tracks con medias 139–593 m y máximos >11 000 m.
 
@@ -459,7 +455,7 @@ La métrica `c=50` es la principal. El baseline a `c=100` queda solo como refere
 | No emitir `tentative` | 87.10 | 0.109 | 0.811 | mantener |
 | `max_coast_s=3` | 85.41 | 0.107 | 0.787 | mantener |
 | Iniciación multisensor (0.25 s, 30 m, 5 hits Unknown) | 83.78 | 0.107 | 0.778 | baseline anterior |
-| Sigmas calibrados (1.4826·MAD) | **88.23** | 0.106 | 0.823 | mantener por robustez |
+| Sigmas calibrados (labels) | **87.76** | 0.111 | 0.817 | mantener por robustez |
 
 Probado y revertido: `merge_distance` 15/25/50, `hits_to_confirm` 2/4, `chi2_gate` 16.3, `q`/`σ_v`/`use_altitude`, y evaluar solo `confirmed`. El detalle está en `reports/`.
 
@@ -467,7 +463,7 @@ Probado y revertido: `merge_distance` 15/25/50, `hits_to_confirm` 2/4, `chi2_gat
 
 - `fusion` se excluye siempre del tracker (`is_test_only`).
 - 87 filas `cyber` de `eval:Dataset_II:S2:I1` no traen `u`; se actualizan en 2D y `u` se propaga con covarianza grande.
-- `σ_az` es un default por tipo, no una medida del sensor; hay que calibrarlo.
+- `σ_az` es un default por tipo, no una medida del sensor; se calibró con las detecciones etiquetadas.
 - El baseline no modela sesgo de sensor ni correlación entre sensores.
 - **Iniciación**: 2 sensores dentro de 0.25 s y 30 m; los `Unknown` necesitan 5 hits para confirmar. Corregido.
 - **Merge**: `merge_distance_m=100` puede fusionar drones reales. En S3:I1 el 52 % de los timestamps tiene dos GT a menos de 100 m; aun así, 100 da mejor GOSPA que 15/25/50.
@@ -483,7 +479,7 @@ Probado y revertido: `merge_distance` 15/25/50, `hits_to_confirm` 2/4, `chi2_gat
 - Estado 3D CV; no se emiten `tentative`; `coast` hasta 3 s.
 - Prefiltro `range` a 5 km; ETL con dedup natural y filtro de velocidad >90 m/s.
 - Iniciación con 2 sensores en 0.25 s y 30 m; `Unknown` requiere 5 hits.
-- Pendiente de calibrar: `σ_az`. `q`, gating y `merge_distance` ya están probados.
+- `σ_az` calibrado con labels; `q`, gating y `merge_distance` ya están probados.
 - Solo-azimut probado y descartado como mejora; flag `initiate_from_bearing` desactivado.
 - Postfiltro `none` y geometría desactivada en el baseline.
 
@@ -499,7 +495,7 @@ Probado y revertido: `merge_distance` 15/25/50, `hits_to_confirm` 2/4, `chi2_gat
 ### Estado actual
 
 - **Hecho**: diagnóstico reproducible, dedup natural, filtro de velocidad >90 m/s, `status` en rejilla, calibración de movimiento/gating, no emitir `tentative`, `max_coast_s=3` e iniciación multisensor temporal.
-- **Baseline**: **88.23** a `c=50` con sigmas calibrados; el 83.78 anterior usaba sigmas ajustados a GOSPA.
+- **Baseline**: **87.76** a `c=50` con sigmas calibrados; el 83.78 anterior usaba sigmas ajustados a GOSPA.
 - **Pendiente**: congelar, ejecutar `eval` y entregar. Solo-azimut ya está probado y descartado como mejora.
 
 ## Clasificación
@@ -530,7 +526,7 @@ No hay umbrales mínimos para las métricas que debamos superar, pero los siguie
 
 | Área | Métrica oficial | Peso | Rango típico | Objetivo interno | Baseline actual |
 |---|---|---:|---|---|---|
-| Tracking | GOSPA ($c=50$ m, $p=2$) | 0.4 | 20–100 m | < 50 m | 74.6–107.7 m (media 88.2) |
+| Tracking | GOSPA ($c=50$ m, $p=2$) | 0.4 | 20–100 m | < 50 m | 73.1–106.4 m (media 87.8) |
 | Clasificación | Recall | 0.2 | 0.60–0.90 | > 0.75 | pendiente |
 | Identificación | Recall | 0.1 | 0.50–0.90 | > 0.70 | pendiente |
 | Fusión | Acierto de metadatos | 0.3 | 0.50–0.80 | > 0.70 | pendiente |
@@ -564,22 +560,15 @@ El diagnóstico reproducible del baseline se obtiene con `python scripts/diagnos
 
 ### Valores por defecto y su justificación
 
-Criterio: un default se acepta si sale de una medida del dataset, de una cota geométrica/física, o si está tuneado en `test` y se marca como tal. Lo no justificado se marca como pendiente.
+Criterio: un default se acepta si sale de una medida del dataset, de una cota física o geométrica, o si está tuneado en `test` y se marca como tal.
 
-Los `σ` de posición se calculan por detección desde `location_x/y/zError`. Si faltan, se usa `default_sigma_m` por tipo y eje, calibrado con el sigma robusto `1.4826·MAD` del error GT→detección (`python scripts/calibrate_sigma.py`): radar 150/154/65, cyber 41/38/30, fusion 29/31/18, other 5/7/2 m. Un `σ` reportado en el tope (5000 m) se trata como placeholder. `σ_az` sigue siendo un parámetro efectivo (5/10/1°), no un `σ` físico, porque el residuo angular aún no está corregido en todos los tracks. La calibración usa `test` (único GT) y no se ajusta con GOSPA; el coste es GOSPA 88.23 frente a 83.78 del baseline anterior, aceptado por robustez. La dispersión entre iteraciones es alta (radar n 67–192 m; cyber 5–171 m), así que el default global es un compromiso: con sensores o datos nuevos hay que recalibrar.
+- **`σ` de sensor**: reportado por detección; si falta, calibrado con detecciones de `test` emparejadas al GT. No se ajusta con GOSPA.
+- **Movimiento, gating y ciclo de vida**: ajustados en `test`.
+- **Pesos de asociación y `max_tentative_misses`**: pendientes de ajustar.
+- **Postfiltro, geometría y clasificación**: inactivos o placeholders.
+- **Límites de `σ`, radio y velocidad**: cotas físicas/geométricas del escenario.
 
-| Bloque | Base | Estado |
-|---|---|---|
-| `etl.default_sigma_m` | `1.4826·MAD` del error GT→detección, Húngaro ≤500 m | Calibrado |
-| `etl.sigma_floor/cap` | suelo numérico y radio del escenario (GT ≤4.3 km) | Asunción |
-| `etl.max_plausible_speed_mps` | drones <90 m/s; quita 162 160 saltos sin bajar cobertura | Empírico |
-| `motion.process_noise_mps2`, `initial_velocity_sigma_mps` | rejillas 0.1–2 y 5–50 en `test` | Tuneado |
-| `gating.chi2_gate`, `gate_distance_m` | rejilla 13.8–100; error GT→detección 82–304 m | Tuneado / empírico |
-| `lifecycle.*` | rejillas en `test` (hits, coast, merge, iniciación) | Tuneado |
-| `prefilter.max_range_m` | GT máximo 4.3 km | Geométrico |
-| `association.cost_class/serial`, `max_tentative_misses` | no tuneados | Pendiente |
-| `postfilter.*`, `geometry.*`, `classification.*` | no activos o placeholders | No usados |
-| `evaluation.*`, `submission.grid_ms` | decisión de proyecto / plantilla | Fijado |
+La calibración de `σ` usa `test` (único GT) y no se ajusta con GOSPA; el coste es GOSPA 87.76 frente a 83.78 del baseline anterior, aceptado por robustez. Con datos o sensores nuevos hay que recalibrar.
 
 ## TODO
 
@@ -588,7 +577,8 @@ Hecho: auditoría, diagnóstico reproducible, README sincronizado, `evaluation.g
 - Solo-azimut como validación de tracks de posición (usar bearings para confirmar/descartar), no como fuente de tracks.
 - `u` ausente: no hay nulos en tracks ni en GT, así que `nan_to_num(u=0)` no se activa; no es una medida necesaria.
 - Robustecer `σ` con enfoque jerárquico (prior por tipo + partial pooling por `sensor_id`), validación NIS/NEES y colas pesadas, con validación leave-one-sensor-out.
-- Calibrar `σ_az` con residuos y valorar UKF/CA/IMM y selección geométrica.
+- `reports/labels/` también da latencias, clutter, pureza de tracks, etiquetas de clasificación/identidad y GT estáticos: útiles, pero no críticos ahora.
+- Validar `σ_az` con residuos y valorar UKF/CA/IMM y selección geométrica.
 - Añadir RTS como postfiltro opcional; solo reduce localización, no cardinalidad.
 - Congelar `config.yaml`, ejecutar `eval` una vez, generar los 3 Excel y cerrar el README.
 - Resolver clasificación, identificación y metadatos: votar por track, decidir amigo/enemigo por serial y rellenar la ficha técnica (modelo, protocolo, banda).
