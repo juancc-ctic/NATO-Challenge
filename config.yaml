@@ -35,14 +35,14 @@ etl:
   # Compresión de los Parquet.
   parquet_compression: zstd
   # Sigma por defecto si el sensor no reporta error, en metros.
-  # Base: sigma robusto (1.4826·MAD) del error GT→detección en test,
-  # emparejando por Húngaro a ≤500 m. No se ajusta con GOSPA.
+  # Base: error mediano de detecciones emparejadas en `reports/labels/sensors.csv`
+  # (horizontal y azimut) y MAD propio para `u`. No se ajusta con GOSPA.
   # `python scripts/calibrate_sigma.py` genera reports/sigma_calibration.csv.
   default_sigma_m:
-    radar: {n: 150.0, e: 154.0, u: 65.0}
-    cyber: {n: 41.0, e: 38.0, u: 30.0}
-    fusion: {n: 29.0, e: 31.0, u: 18.0}
-    other: {n: 5.0, e: 7.0, u: 2.0}
+    radar: {n: 35.0, e: 35.0, u: 65.0}
+    cyber: {n: 25.0, e: 25.0, u: 30.0}
+    fusion: {n: 21.0, e: 21.0, u: 18.0}
+    other: {n: 6.0, e: 6.0, u: 2.0}
   # Un sigma reportado igual o mayor que el tope se trata como placeholder.
   sigma_cap_is_missing: true
   # Límites de sigma tras convertir y recortar.
@@ -143,13 +143,12 @@ tracker:
   measurement:
     use_elevation: false
     # Incertidumbre angular por tipo si la detección no la trae, en grados.
-    # No hay `σ_az` en la BD. Probados valores empíricos (rf 20, acústico 3,
-    # cámara 2): GOSPA empeoró. Se mantienen 5/10/1 como parámetros efectivos
-    # del filtro con el residuo actual, no como sigma físico.
+    # Base: error mediano de azimut en `reports/labels/sensors.csv`
+    # (rf 6.9°, acústico 2.4°, cámara 0.4°) convertido a sigma.
     sigma_az_deg:
-      rf: 5.0
-      acoustic: 10.0
-      camera: 1.0
+      rf: 10.0
+      acoustic: 3.5
+      camera: 0.6
     # Sigma inicial de velocidad si el track nace sin ella, en m/s.
     # Mejor valor de la rejilla 5–50 en los 6 folds de test.
     initial_velocity_sigma_mps: 50.0
