@@ -26,16 +26,19 @@ if str(ROOT) not in sys.path:
 
 from src.compare import add_geodetic, horizontal_ellipse, load_origins, run_compare  # noqa: E402
 
-_DRONE_RE = re.compile(r"DroneTag_([A-Z]+)_\d{6}_\d{4}_\d{4}_(.+?)(?:-\d+)?$")
+_DRONE_RE = re.compile(r"DroneTag_([A-Z]+)_\d{6}_(\d{4})_\d{4}_(.+?)(?:-\d+)?$")
 TRACK_COLORS = ["#ffe066", "#7cf29a", "#c9a2ff", "#5fe1d3", "#ff9de2", "#d9f27c", "#ffc285", "#a0d8ff",
                 "#f7f7f7", "#b5f5c8"]
 
 
 def viewer_drone_key(drone_key: str) -> str:
-    """`test:S1:I1:DroneTag_RED_..._FPV` -> `RED · FPV` (clave de dron del visor)."""
+    """`test:S1:I1:DroneTag_RED_240916_0731_0736_FPV` -> `RED · FPV 07:31` (clave de dron del visor).
+
+    Debe coincidir con `data_loader._read_drone`.
+    """
     stem = str(drone_key).split(":")[-1]
     m = _DRONE_RE.search(stem)
-    return f"{m.group(1)} · {m.group(2)}" if m else stem
+    return f"{m.group(1)} · {m.group(3)} {m.group(2)[:2]}:{m.group(2)[2:]}" if m else stem
 
 
 def infer_split_group(iteration_dir: str) -> str | None:

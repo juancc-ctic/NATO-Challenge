@@ -49,6 +49,14 @@ def _classification(s):
     return cls, sub, float(conf) if conf is not None else np.nan
 
 
+def _object_info(s):
+    """Resume `objectInfo` (p. ej. "[{'type': 'technology', 'value': 'DJI Ocusync'}]") para el hover."""
+    items = [d for d in _parse_list(s) if isinstance(d, dict)]
+    useful = [str(d.get("value")) for d in items
+              if d.get("type") in ("technology", "droneMaker", "model", "protocol") and d.get("value")]
+    return "(" + ", ".join(useful) + ")" if useful else ""
+
+
 def _to_deg(x, y, coord_system):
     """Pasa a grados si el sistema de coordenadas viene en radianes."""
     if isinstance(coord_system, str) and "RAD" in coord_system:
@@ -114,18 +122,21 @@ class Dataset:
 import re
 
 _SENSOR_RE = re.compile(r"([A-Za-z0-9]+)_([A-Z0-9]+)_(.+?)_\d{6}_\d{4}_\d{4}")
-_DRONE_RE = re.compile(r"DroneTag_([A-Z]+)_\d{6}_\d{4}_\d{4}_(.+?)(?:-\d+)?\.csv$")
+_DRONE_RE = re.compile(r"DroneTag_([A-Z]+)_\d{6}_(\d{4})_\d{4}_(.+?)(?:-\d+)?\.csv$")
 
 
 def _read_drone(path_or_buf, filename=None):
     base = filename or os.path.basename(str(path_or_buf))
     m = _DRONE_RE.search(base)
-    team, name = (m.group(1), m.group(2)) if m else ("?", os.path.splitext(base)[0])
+    team, takeoff, name = (m.group(1), m.group(2), m.group(3)) if m else ("?", "", os.path.splitext(base)[0])
     df = pd.read_csv(path_or_buf, index_col=0)
     df["t"] = pd.to_datetime(df["timestamp"])
     df = df.sort_values("t").reset_index(drop=True)
     df["speed"] = np.sqrt(df["velocity_x"] ** 2 + df["velocity_y"] ** 2 + df["velocity_z"] ** 2)
-    return Drone(key=f"{team} · {name}", name=name, team=team, file=base, df=df)
+    # La clave incluye la hora de despegue: hay iteraciones con dos drones del mismo modelo
+    # (p. ej. dos FPV en S3·I1) y con solo "equipo · modelo" uno sobrescribía al otro.
+    key = f"{team} · {name} {takeoff[:2]}:{takeoff[2:]}" if takeoff else f"{team} · {name}"
+    return Drone(key=key, name=name, team=team, file=base, df=df)
 
 
 def _read_sensor(path_or_buf, filename=None):
@@ -148,11 +159,18 @@ def _read_sensor(path_or_buf, filename=None):
     df["s_lon"], df["s_lat"] = slon, slat
     df["s_z"] = df["sensor_location_z"].astype(float)
 
-    # Clasificación
-    cl = df["classification"].map(_classification)
-    df["cls"] = [c[0] for c in cl]
-    df["subcls"] = [c[1] for c in cl]
-    df["cls_conf"] = [c[2] for c in cl]
+    # Clasificación. Algunos sensores no la traen: los RF pasivos OEPS y GTYT solo dan azimut,
+    # `objectInfo` (tecnología, fabricante, MAC…) y `signal` (README_Sensor.pdf). Antes el visor
+    # fallaba con KeyError al cargar iteraciones con esos sensores (eval Dataset I y III, test S4·I4).
+    if "classification" in df.columns:
+        cl = df["classification"].map(_classification)
+        df["cls"] = [c[0] for c in cl]
+        df["subcls"] = [c[1] for c in cl]
+        df["cls_conf"] = [c[2] for c in cl]
+    else:
+        df["cls"] = "Unknown"
+        df["subcls"] = df["objectInfo"].map(_object_info) if "objectInfo" in df.columns else ""
+        df["cls_conf"] = np.nan
 
     # Confianza: se usa la columna que realmente aporta información
     det = df["detectionConfidence"].astype(float) if "detectionConfidence" in df else None
@@ -174,7 +192,8 @@ def _read_sensor(path_or_buf, filename=None):
         lon, lat = _to_deg(df["location_x"].astype(float), df["location_y"].astype(float),
                         df["location_coordinateSystem"].iloc[0])
         df["lon"], df["lat"] = lon, lat
-        df["z_raw"] = df["location_z"].astype(float)
+        # SMFS (RF pasivo) da lat/lon pero no `location_z`: se marca para dibujarlo a ras de suelo.
+        df["z_raw"] = df["location_z"].astype(float) if "location_z" in df.columns else np.nan
     else:
         df["az"] = df["rangeBearing_azimuth"].astype(float)
         df["el"] = df["rangeBearing_elevation"].astype(float) if "rangeBearing_elevation" in df else 0.0
@@ -251,7 +270,13 @@ def build_dataset(sensors: list[Sensor], drones: list[Drone]) -> Dataset:
         sensor_is_agl = s.pos_z_raw < ground_ref - 20
         s.pos_z_agl = s.pos_z_raw if sensor_is_agl else s.pos_z_raw - ground_ref
 
-        if not s.bearing_only:
+        if not s.bearing_only and d["z_raw"].isna().all():
+            d["e"], d["n"] = proj.enu(d["lon"], d["lat"])
+            d["z_raw"] = ground_ref
+            d["z_agl"] = 0.0
+            s.z_offset = 0.0
+            s.z_note = "el sensor no da altitud: sus detecciones se dibujan a ras de suelo"
+        elif not s.bearing_only:
             d["e"], d["n"] = proj.enu(d["lon"], d["lat"])
             off, nmatch, consistent = _estimate_z_offset(s, drones_d)
             if off is not None and not consistent:
