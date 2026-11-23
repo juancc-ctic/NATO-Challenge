@@ -155,11 +155,25 @@ def _refresh_globals():
 
     e_series = [d.df["e"] for d in DS.drones.values()] + [pd.Series([s.pos_e]) for s in DS.sensors.values()]
     n_series = [d.df["n"] for d in DS.drones.values()] + [pd.Series([s.pos_n]) for s in DS.sensors.values()]
+    # Detecciones con posición: en eval no hay drones GT y sin ellas los ejes quedaban ceñidos a los
+    # sensores. Percentiles 2–98 y < 6 km (el GT de test vuela en ±4 km) para no estirar los ejes con
+    # ruido lejano del radar (ecos hasta ~200 km).
+    det_e, det_n = [], []
+    for s in DS.sensors.values():
+        if not s.bearing_only and {"e", "n"} <= set(s.df.columns):
+            ok = np.hypot(s.df["e"], s.df["n"]) < 6000
+            det_e.append(s.df.loc[ok, "e"])
+            det_n.append(s.df.loc[ok, "n"])
+    if det_e and pd.concat(det_e).notna().any():
+        de, dn = pd.concat(det_e).dropna(), pd.concat(det_n).dropna()
+        e_series.append(de.quantile([0.02, 0.98]))
+        n_series.append(dn.quantile([0.02, 0.98]))
     if e_series and n_series:
-        _e = pd.concat(e_series)
-        _n = pd.concat(n_series)
-        XR = [float(_e.min()) - MARGIN, float(_e.max()) + MARGIN]
-        YR = [float(_n.min()) - MARGIN, float(_n.max()) + MARGIN]
+        _e = pd.concat(e_series).dropna()
+        _n = pd.concat(n_series).dropna()
+        if len(_e) and len(_n):
+            XR = [float(_e.min()) - MARGIN, float(_e.max()) + MARGIN]
+            YR = [float(_n.min()) - MARGIN, float(_n.max()) + MARGIN]
 
 
 _refresh_globals()

@@ -158,6 +158,10 @@ def _read_sensor(path_or_buf, filename=None):
                         df["sensor_location_coordinateSystem"].iloc[0])
     df["s_lon"], df["s_lat"] = slon, slat
     df["s_z"] = df["sensor_location_z"].astype(float)
+    # (0, 0) es un valor de relleno, no una posición (VKYY y QTVS, tipo OTHER, la traen siempre).
+    # Proyectado cae en el ecuador, a ~5.700 km, y estiraba los ejes del visor. El ETL hace lo mismo.
+    bad_s = (df["s_lon"].abs() < 1e-6) & (df["s_lat"].abs() < 1e-6)
+    df.loc[bad_s, ["s_lon", "s_lat", "s_z"]] = np.nan
 
     # Clasificación. Algunos sensores no la traen: los RF pasivos OEPS y GTYT solo dan azimut,
     # `objectInfo` (tecnología, fabricante, MAC…) y `signal` (README_Sensor.pdf). Antes el visor
@@ -194,6 +198,9 @@ def _read_sensor(path_or_buf, filename=None):
         df["lon"], df["lat"] = lon, lat
         # SMFS (RF pasivo) da lat/lon pero no `location_z`: se marca para dibujarlo a ras de suelo.
         df["z_raw"] = df["location_z"].astype(float) if "location_z" in df.columns else np.nan
+        # Detecciones en (0, 0): mismo valor de relleno (p. ej. algunas de ILYS en S4·I4).
+        bad = (df["lon"].abs() < 1e-6) & (df["lat"].abs() < 1e-6)
+        df.loc[bad, ["lon", "lat", "z_raw"]] = np.nan
     else:
         df["az"] = df["rangeBearing_azimuth"].astype(float)
         df["el"] = df["rangeBearing_elevation"].astype(float) if "rangeBearing_elevation" in df else 0.0
@@ -265,8 +272,10 @@ def build_dataset(sensors: list[Sensor], drones: list[Drone]) -> Dataset:
 
     for s in sensors:
         d = s.df
+        # Mediana de las posiciones válidas; NaN si el sensor no tiene ninguna (no se dibuja su posición).
         s.pos_e, s.pos_n = map(float, proj.enu(d["s_lon"].median(), d["s_lat"].median()))
         s.pos_z_raw = float(d["s_z"].median())
+        no_pos = d["s_lon"].isna().all()
         sensor_is_agl = s.pos_z_raw < ground_ref - 20
         s.pos_z_agl = s.pos_z_raw if sensor_is_agl else s.pos_z_raw - ground_ref
 
@@ -296,6 +305,8 @@ def build_dataset(sensors: list[Sensor], drones: list[Drone]) -> Dataset:
             d["z_agl"] = d["z_raw"] + s.z_offset - ground_ref
         else:
             s.z_note = "sensor de sólo marcación (sin distancia): se dibujan rayos"
+        if no_pos:
+            s.z_note += " · posición del sensor no informada (0,0 en el CSV): no se dibuja"
 
     t_all = pd.concat([s.df["t"] for s in sensors] + [dr.df["t"] for dr in drones])
     return Dataset(sensors={s.key: s for s in sensors}, drones=drones_d, proj=proj,
