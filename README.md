@@ -140,7 +140,7 @@ python scripts/diagnose_tracking.py  # diagnóstico GOSPA c=50/c=100, cobertura 
 python -m src.cli submit    # Excel de entrega en out/ (9 iteraciones)
 ```
 
-`submit` usa los tracks reales de `reports/tracks.parquet`; no hay datos mock. Los campos aún no implementados (modelo, protocolo, banda e identidad) salen como `Unknown`.
+`submit` usa los tracks reales de `reports/tracks.parquet`; no hay datos mock. Los campos aún no implementados (clasificación, modelo, protocolo, banda e identidad) salen como `Unknown` hasta que exista su sidecar.
 
 Para entrega usa solo los 3 de evaluación:
 
@@ -150,7 +150,7 @@ python -m src.cli submit --split eval
 
 Genera `out/scenario_1_iteration_3.xlsx`, `out/scenario_2_iteration_1.xlsx` y `out/scenario_2_iteration_3.xlsx`; los otros 6 de `out/` son de test para prueba local.
 
-`submit` mezcla sidecars opcionales por track si existen en `reports/`: `classification.parquet`, `identification.parquet` y `metadata.parquet`, con claves `split_group` y `track_id`. Si un sidecar no existe o está vacío, deja `Unknown` y continúa; no hay que tocar `classify.py`, `identify.py` ni `metadata.py`. El `track_id` de salida es un UUID5 determinista por track y los seriales se ajustan a los valores admitidos por la plantilla.
+`submit` mezcla sidecars opcionales por track si existen en `reports/`: `classification.parquet`, `identification.parquet` y `metadata.parquet`, con claves `split_group` y `track_id`. Si un sidecar no existe o está vacío, deja `Unknown` y continúa; no hay que tocar `classify.py`, `identify.py` ni `metadata.py`. El tracker no aporta clasificación final: deja `classification`/`identity` en `Unknown` y solo exporta pistas de trazabilidad (`sensor_class_hint`, `sensor_serial_hint`), que `submit` no usa. El `track_id` de salida es un UUID5 determinista por track y los seriales se ajustan a los valores admitidos por la plantilla.
 
 Para reconstruir desde cero:
 
@@ -400,6 +400,10 @@ $$
 
 No hay corrección con medidas: es una predicción/coast sobre la rejilla. Tampoco interpola detecciones (eso sería `fill_gaps` del postfiltro). Así se obtiene posición y covarianza en cada timestamp de entrega.
 
+### Salida de tracks
+
+`reports/tracks.parquet` es la salida geométrica del tracker. `track_id` es genérico (`id_0`, `id_1`, …) y se reinicia en cada `split_group`; la iteración se identifica por `split_group`, no por el id. Cada `split_group` es una iteración/escenario independiente: el tracker se reinicia para cada uno y sus tracks son locales a esa iteración. El tracker no clasifica ni identifica: `classification`/`identity` salen `Unknown` y `classification_confidence=0.0`. Para trazabilidad sí exporta la última pista no nula del sensor en `sensor_class_hint` y `sensor_serial_hint`; no son la clase ni el serial finales y `submit` no las usa. El clasificador posterior escribe `reports/classification.parquet` con claves `split_group` y `track_id`; `submit` mezcla ese sidecar.
+
 ### Evaluación
 
 GOSPA mide a la vez localización y cardinalidad. Sus componentes son: el error de localización de los pares emparejados ($d_i^p$), la penalización por objetivos del GT no detectados y la penalización por tracks falsos; $c$ trunca la distancia y $p$ controla la sensibilidad.
@@ -456,6 +460,9 @@ La métrica `c=50` es la principal. El baseline a `c=100` queda solo como refere
 | `max_coast_s=3` | 85.41 | 0.107 | 0.787 | mantener |
 | Iniciación multisensor (0.25 s, 30 m, 5 hits Unknown) | 83.78 | 0.107 | 0.778 | baseline anterior |
 | Sigmas calibrados (labels) | **87.76** | 0.111 | 0.817 | mantener por robustez |
+| Sigmas MAD (`479bfab`) | 88.84 | 0.107 | 0.830 | descartar: labels mejora |
+
+El rerun controlado de la calibración MAD con el tracker actual da 88.84, no el 88.23 histórico; aquel artefacto era anterior al commit `479bfab`. Evidencia en `reports/sigma_mad_vs_labels/`.
 
 Probado y revertido: `merge_distance` 15/25/50, `hits_to_confirm` 2/4, `chi2_gate` 16.3, `q`/`σ_v`/`use_altitude`, y evaluar solo `confirmed`. El detalle está en `reports/`.
 
@@ -500,7 +507,7 @@ Probado y revertido: `merge_distance` 15/25/50, `hits_to_confirm` 2/4, `chi2_gat
 
 ## Clasificación
 
-...
+Pendiente. El tracker no asigna clase final y deja `classification=Unknown`; solo exporta `sensor_class_hint` para trazabilidad. La salida genérica y el contrato del sidecar `reports/classification.parquet` están en [Salida de tracks](#salida-de-tracks). `src/classify.py` solo normaliza la clase del sensor para asociación/fusión interna.
 
 ## Identificación
 

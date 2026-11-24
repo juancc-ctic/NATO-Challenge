@@ -87,9 +87,9 @@ def resample_tracks(
                     "misses": int(snapshot["misses"]),
                     "age": int(snapshot["age"]),
                     "last_update_ms": int(snapshot["last_update_ms"]),
-                    "class_norm": snapshot.get("class_norm"),
-                    "serial_norm": snapshot.get("serial_norm"),
-                    "classification": snapshot.get("class_norm") or "Unknown",
+                    "sensor_class_hint": snapshot.get("sensor_class_hint") or "Unknown",
+                    "sensor_serial_hint": snapshot.get("sensor_serial_hint"),
+                    "classification": "Unknown",
                     "classification_confidence": 0.0,
                     "identity": "Unknown",
                 }

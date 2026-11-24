@@ -177,6 +177,19 @@ Una fila por segundo y dron. `drone_key` no está en detecciones: está aquí y 
 | `serial_norm` | serial normalizado para comparar |
 | `source_file`, `source_relpath`, `raw_index` | fichero y fila original |
 
+## Esquema de `tracks.parquet`
+
+| Columna | Qué es |
+|---|---|
+| `split_group`, `ts_ms`, `track_id` | iteración, timestamp de la rejilla y id genérico `id_0`, `id_1`, …; el id se reinicia en cada `split_group` |
+| `n`, `e`, `u` | posición ENU estimada por el EKF |
+| `C_nn`, `C_ne`, `C_nu`, `C_ee`, `C_eu`, `C_uu` | covarianza de posición |
+| `status`, `hits`, `misses`, `age`, `last_update_ms` | estado del ciclo de vida y contadores internos |
+| `sensor_class_hint`, `sensor_serial_hint` | última clase y serial no nulos del sensor; solo trazabilidad, no son la clasificación ni la identificación finales |
+| `classification`, `classification_confidence`, `identity` | `Unknown` y `0.0`; el tracker no clasifica ni identifica |
+
+La clase y el serial del sensor se usan dentro del tracker para asociar y fusionar; se exportan como pistas de trazabilidad y `submit` no las usa. El clasificador posterior escribe `reports/classification.parquet` con claves `split_group` y `track_id`.
+
 ## Artefactos y salidas
 
 | Artefacto | Contenido |
@@ -194,6 +207,6 @@ Una fila por segundo y dron. `drone_key` no está en detecciones: está aquí y 
 | `reports/etl_issues.csv` | incidencias por fila |
 | `reports/null_counts.csv` | nulos por tabla y columna |
 | `reports/check.json`, `reports/check/*.xlsx` | validación de plantillas Excel |
-| `reports/tracks.parquet` | tracks estimados por el tracker EKF |
+| `reports/tracks.parquet` | tracks estimados por el tracker EKF, con `track_id` genérico, clase `Unknown` y pistas `sensor_*_hint` |
 | `reports/tracking_metrics.csv` | GOSPA, RMSE, recall, tracks falsos e ID switches por iteración |
 | `out/` | solo Excel de entrega |

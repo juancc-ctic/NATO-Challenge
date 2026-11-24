@@ -479,6 +479,20 @@ def _known(value: Any) -> bool:
     }
 
 
+def _renumber_track_ids(tracks: pd.DataFrame) -> pd.DataFrame:
+    """[salida] Renumera los tracks a `id_0`, `id_1`, … por iteración."""
+    if tracks.empty:
+        return tracks
+    output: list[pd.DataFrame] = []
+    for _, group in tracks.groupby("split_group", sort=False):
+        order = group.sort_values("ts_ms")["track_id"].drop_duplicates().tolist()
+        mapping = {track_id: f"id_{index}" for index, track_id in enumerate(order)}
+        group = group.copy()
+        group["track_id"] = group["track_id"].map(mapping)
+        output.append(group)
+    return pd.concat(output, ignore_index=True)[TRACK_COLUMNS]
+
+
 def manage_tracks(
     tracks: list[Track],
     updated_ids: set[str],
@@ -528,7 +542,7 @@ def manage_tracks(
     ):
         if not _can_initiate(detection, tracker_cfg):
             continue
-        track_id = f"{split_group}:T{next_id:04d}"
+        track_id = f"id_{next_id}"
         next_id += 1
         tracks.append(
             initialize_track(
@@ -560,8 +574,8 @@ def _snapshot(track: Track, now_ms: int) -> dict[str, Any]:
         "misses": track.misses,
         "age": track.age,
         "last_update_ms": track.last_update_ms,
-        "class_norm": track.class_norm,
-        "serial_norm": track.serial_norm,
+        "sensor_class_hint": track.class_norm,
+        "sensor_serial_hint": track.serial_norm,
         "u": float(track.state[2]) if state_dim >= 3 else float("nan"),
     }
 
@@ -599,7 +613,7 @@ def run_tracker(detections: pd.DataFrame, cfg: Any) -> pd.DataFrame:
         tracks: list[Track] = []
         history: list[dict[str, Any]] = []
         initiation_buffer: list[Mapping[str, Any]] = []
-        next_id = 1
+        next_id = 0
         last_timestamp: int | None = None
         for timestamp in timestamps:
             current = group[group["ts_ms"] == timestamp]
@@ -713,6 +727,7 @@ def run_tracker(detections: pd.DataFrame, cfg: Any) -> pd.DataFrame:
         resampled = postprocess_tracks(resampled, tracker_cfg, grid_ms)
         if not output_tentative and not resampled.empty:
             resampled = resampled[resampled["status"] != "tentative"]
+        resampled = _renumber_track_ids(resampled)
         output.append(resampled)
     if not output:
         return pd.DataFrame(columns=TRACK_COLUMNS)

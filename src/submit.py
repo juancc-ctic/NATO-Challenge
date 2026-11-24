@@ -29,10 +29,6 @@ _DEFAULTS: dict[str, Any] = {
     "serial_number": "Unknown",
     "signal_frequency_band": "Unknown",
 }
-_ALIASES: dict[str, tuple[str, ...]] = {
-    "classification": ("class_norm",),
-    "serial_number": ("serial_norm",),
-}
 _ALLOWED_SERIALS = (
     "F45TB21BR1AE03FP",
     "163DG1700154R3",
@@ -56,23 +52,18 @@ def _serial_value(value: Any) -> str:
 
 
 def _value(track: pd.Series, column: str) -> Any:
-    """Devuelve el valor de una columna de track, con alias y default."""
-    candidates = (column, *_ALIASES.get(column, ()))
-    for name in candidates:
-        if name not in track:
-            continue
-        value = track.get(name)
-        if value is None:
-            continue
-        try:
-            if pd.isna(value):
-                continue
-        except (TypeError, ValueError):
-            pass
-        if column == "serial_number":
-            return _serial_value(value)
-        return value
-    return _DEFAULTS.get(column)
+    """Devuelve el valor de una columna de track, con default."""
+    value = track.get(column)
+    if value is None:
+        return _DEFAULTS.get(column)
+    try:
+        if pd.isna(value):
+            return _DEFAULTS.get(column)
+    except (TypeError, ValueError):
+        pass
+    if column == "serial_number":
+        return _serial_value(value)
+    return value
 
 
 def _cell(value: Any) -> Any:

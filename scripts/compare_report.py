@@ -49,7 +49,7 @@ def top_view(gt: pd.DataFrame, tracks: pd.DataFrame, run: TL.Run, gt_view: dict,
         g = g.iloc[::10]  # 1 punto/s
         fig.add_trace(go.Scatter(x=g.e, y=g.n, mode="lines", line=dict(color=run.colors.get(tid, "#ffe066"), width=1.5,
                                                                           dash="dash"),
-                                 opacity=0.85, showlegend=False, hovertemplate=f"Track …{tid[-6:]}<extra></extra>"))
+                                 opacity=0.85, showlegend=False, hovertemplate=f"Track {tid}<extra></extra>"))
     for key, g in gt.sort_values("ts_ms").groupby("drone_key"):
         view = gt_view.get(key, key)
         fig.add_trace(go.Scatter(x=g.e, y=g.n, mode="lines", line=dict(color=colors.get(view, "#ccc"), width=3),

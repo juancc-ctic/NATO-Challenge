@@ -141,13 +141,14 @@ def track_traces(go, layer: TrackLayer, run_name: str, t_now: float, t_lo: float
     if "tracks" in opts:
         for tid, g in d.groupby("track_id"):
             col = run.colors[tid]
-            custom = np.stack([g.track_id.str[-6:], g.classification.fillna("Unknown").astype(str),
+            hint = g["sensor_class_hint"] if "sensor_class_hint" in g.columns else g["classification"]
+            custom = np.stack([g.track_id.astype(str), hint.fillna("Unknown").astype(str),
                                np.sqrt(np.clip(g.C_nn.to_numpy() + g.C_ee.to_numpy(), 0, None)).round(1)], -1)
             traces.append(go.Scatter3d(
                 x=g.ve, y=g.vn, z=g[zc].fillna(0).clip(upper=z_max), mode="lines",
-                line=dict(color=col, width=3, dash="dash"), name=f"Track …{tid[-6:]}", legendgroup="tracks",
+                line=dict(color=col, width=3, dash="dash"), name=f"Track {tid}", legendgroup="tracks",
                 showlegend=False, customdata=custom,
-                hovertemplate=("<b>Track estimado …%{customdata[0]}</b><br>Clase: %{customdata[1]}"
+                hovertemplate=("<b>Track estimado %{customdata[0]}</b><br>Pista sensor: %{customdata[1]}"
                                "<br>Incertidumbre horizontal (1σ): %{customdata[2]} m<extra></extra>")))
             last = g.iloc[-1]
             if t_now - last.ts <= 1.5:
@@ -174,7 +175,7 @@ def track_traces(go, layer: TrackLayer, run_name: str, t_now: float, t_lo: float
             xs += list(row.ve + pts[:, 1]) + [None]
             ys += list(row.vn + pts[:, 0]) + [None]
             zs += [z] * len(pts) + [None]
-            txt += [f"Track …{row.track_id[-6:]} · semieje mayor 2σ real: {real:.0f} m"] * len(pts) + [None]
+            txt += [f"Track {row.track_id} · semieje mayor 2σ real: {real:.0f} m"] * len(pts) + [None]
         label = "Incertidumbre 2σ" + ("" if scale == 1 else f" (dibujada ×{scale:g})")
         traces.append(go.Scatter3d(x=xs, y=ys, z=zs, mode="lines", line=dict(color="#ffe066", width=3),
                                    opacity=0.8, name=label, text=txt, hovertemplate="%{text}<extra></extra>"))
@@ -288,7 +289,7 @@ def comparison_figure(go, make_subplots, layer: TrackLayer, run_name: str, ds, t
                     fig.add_trace(go.Scatter(
                         x=[to_t(s.ts_ms.iloc[0]), to_t(s.ts_ms.iloc[-1] + 1000)], y=[i, i], mode="lines",
                         line=dict(color=run.colors.get(tid, col), width=11), showlegend=False,
-                        hovertemplate=f"{view}<br>Track …{tid[-6:]}<br>%{{x|%H:%M:%S}}<extra></extra>"), row=2, col=1)
+                        hovertemplate=f"{view}<br>Track {tid}<br>%{{x|%H:%M:%S}}<extra></extra>"), row=2, col=1)
         # Todas las filas con su nombre (con ejes categóricos Plotly ocultaba algunas).
         fig.update_yaxes(tickmode="array", tickvals=list(range(len(views))), ticktext=views,
                          range=[-0.6, len(views) - 0.4], showgrid=False, row=2, col=1)

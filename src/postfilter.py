@@ -57,7 +57,7 @@ def _fill_gaps(
     max_gap_ms = int(postfilter_cfg.get("max_gap_ms", 1000))
     limit = max(1, max_gap_ms // max(grid_ms, 1))
     output: list[pd.DataFrame] = []
-    for _, track in tracks.groupby("track_id", sort=False):
+    for _, track in tracks.groupby(["split_group", "track_id"], sort=False):
         ordered = track.sort_values("ts_ms").set_index("ts_ms")
         start = int(ordered.index.min())
         end = int(ordered.index.max())
@@ -79,8 +79,8 @@ def _fill_gaps(
             "misses",
             "age",
             "last_update_ms",
-            "class_norm",
-            "serial_norm",
+            "sensor_class_hint",
+            "sensor_serial_hint",
             "classification",
             "classification_confidence",
             "identity",
@@ -111,7 +111,7 @@ def _moving_average(
     output = tracks.copy()
     for column in ("n", "e", "u"):
         output[column] = (
-            output.groupby("track_id", sort=False)[column]
+            output.groupby(["split_group", "track_id"], sort=False)[column]
             .transform(
                 lambda values: values.rolling(
                     window=window, center=True, min_periods=1
@@ -136,7 +136,7 @@ def _plausibility(
     )
     step_s = max(grid_ms, 1) / 1000.0
     keep: list[pd.DataFrame] = []
-    for _, track in tracks.groupby("track_id", sort=False):
+    for _, track in tracks.groupby(["split_group", "track_id"], sort=False):
         ordered = track.sort_values("ts_ms")
         positions = ordered[["n", "e", "u"]].to_numpy(dtype=float)
         if len(positions) < 2:

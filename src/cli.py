@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
         _print(
             {
                 "tracks": int(len(tracks)),
-                "track_ids": int(tracks["track_id"].nunique()),
+                "track_ids": int(tracks.groupby(["split_group", "track_id"]).ngroups),
                 "split_groups": int(tracks["split_group"].nunique()),
                 "output": str(output),
             }
@@ -154,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
             },
             "tracking": {
                 "tracks": int(len(tracks)),
-                "track_ids": int(tracks["track_id"].nunique()),
+                "track_ids": int(tracks.groupby(["split_group", "track_id"]).ngroups),
                 "gospa": metrics["gospa"],
                 "rmse": metrics["rmse"],
                 "recall": metrics["recall"],
