@@ -621,7 +621,13 @@ app.index_string = app.index_string.replace("</head>", f"""
  .sidebar label, .sidebar label span {{ color:{TEXT} !important; }}
  /* Menú de los desplegables (fondo blanco): texto oscuro. Solo .dash-dropdown-content: las casillas y
     botones de opción usan también "dash-options-list-option" y quedaban negro sobre oscuro. */
- .dash-dropdown-content, .dash-dropdown-content * {{ color:#111 !important; }}
+ .dash-dropdown-content, .dash-dropdown-content *,
+ .sidebar .dash-dropdown-content label, .sidebar .dash-dropdown-content label span,
+ .sidebar .dash-dropdown-content .dash-dropdown-option, .sidebar .dash-dropdown-content .dash-dropdown-option * {{
+    color:#111 !important; opacity:1 !important; }}
+ /* Casillas de sensores y drones: texto claro siempre, aunque el hijo traiga su propio color. */
+ #sensors, #sensors *, #drones, #drones * {{ color:{TEXT} !important; opacity:1 !important; }}
+ #sensors .sub, #drones .sub {{ color:{MUTED} !important; }}
  .sidebar .sub {{ color:{MUTED} !important; }}
  .dash-slider-mark, .rc-slider-mark-text, [class*="mark"] {{ color:{MUTED} !important; font-size:10px; }}
  .bottom {{ height:420px; min-height:420px; border-top:1px solid #24303a; display:flex; flex-direction:column; }}
