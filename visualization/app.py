@@ -360,6 +360,11 @@ def build_figure(t_now, sensors_on, drones_on, opts, color_mode, min_conf, ray_l
                                   ell_scale, min_dur):
             fig.add_trace(tr)
 
+    # Detecciones que ningún track tiene cerca (qué está ignorando el tracker)
+    if LAYER is not None and "orphans" in tr_opts:
+        for tr in TL.orphan_traces(go, LAYER, run_name, t_now, t_lo, zc, z_max, "orphans_radar" in tr_opts):
+            fig.add_trace(tr)
+
     # Excel de entrega (lo que se envía de verdad)
     if show_sub and SUB is not None:
         for tr in SUBL.submission_traces(go, SUB, t_now, t_lo, zc, z_max):
@@ -439,7 +444,9 @@ def _tracker_state():
     if runs:
         opts += [{"label": "Trayectorias estimadas (discontinuas)", "value": "tracks"},
                  {"label": "Error real↔estimado (línea blanca)", "value": "errors"} if LAYER.gt_has else None,
-                 {"label": "Elipse de incertidumbre 2σ", "value": "ellipse"}]
+                 {"label": "Elipse de incertidumbre 2σ", "value": "ellipse"},
+                 {"label": "Detecciones sin track cercano (✕)", "value": "orphans"},
+                 {"label": "   … incluir radares (mucho ruido)", "value": "orphans_radar"}]
         opts = [o for o in opts if o]
     if not LAYER.labelled.empty:
         opts.append({"label": "Detecciones coloreadas por etiqueta", "value": "labels"})
@@ -452,6 +459,23 @@ def _tracker_state():
                 run=runs[0] if runs else "A",
                 run_style={"display": "flex" if len(runs) > 1 else "none", "alignItems": "center",
                            "marginTop": "4px"})
+
+
+def _orphan_children():
+    """Resumen por sensor de las detecciones sin track cercano (run A)."""
+    run = LAYER.runs.get("A") if LAYER is not None else None
+    if run is None or run.orphan_stats.empty:
+        return []
+    st = run.orphan_stats.drop(columns=["Tipo"])
+    last = "Drones sin track" if "Drones sin track" in st.columns else "% drones en test"
+    help_txt = ("Drones sin track: detecciones que el etiquetado asigna a un dron real y que ningún track recoge."
+                if last == "Drones sin track" else
+                "% drones en test: qué parte de lo que detecta ese sensor era un dron real en test. "
+                "Alto + muchas sin track = probables drones perdidos.")
+    return [html.Div("Detecciones sin track cercano (run A)", className="sec-title", style={"marginBottom": "4px"}),
+            html.Div(_table(st), style={"overflowX": "auto"}),
+            html.Div(help_txt + " Los radares tienen mucho ruido: es normal que la mayoría no tenga track.",
+                     className="help")]
 
 
 def _tracker_section():
@@ -475,7 +499,8 @@ def _tracker_section():
                  id="run-wrap", style=st["run_style"]),
         html.Div("Al activar las etiquetas conviene ocultar los sensores para ver solo los colores "
                  "del etiquetado. Gris = ruido (no casa con ningún dron real).", className="help",
-                 style={"marginTop": "4px"}))
+                 style={"marginTop": "4px"}),
+        html.Div(_orphan_children(), id="orphan-info", style={"marginTop": "10px"}))
 
 
 CHECK_ICON = {"ok": ("✔", "#5ee36a"), "warn": ("!", "#f2d33c"), "fail": ("✖", "#ff6f61")}
@@ -849,14 +874,14 @@ def _update_cmp(t, run_name, _version):
     Output("tr-group", "children"), Output("tr-opts", "options"), Output("tr-opts", "value"),
     Output("run", "options"), Output("run", "value"), Output("run-wrap", "style"),
     Output("bottom", "style"), Output("summary", "children"), Output("sub-info", "children"),
-    Output("iter-version", "data"), Output("iter-loading", "children"),
+    Output("iter-version", "data"), Output("iter-loading", "children"), Output("orphan-info", "children"),
     Input("iteration", "value"), State("iter-version", "data"),
     prevent_initial_call=True,
 )
 def _on_iteration(iteration_dir, version):
     """Cambia de iteración sin relanzar: recarga todo y actualiza los controles."""
     if not iteration_dir or iteration_dir == ITERATION_DIR:
-        return (no_update,) * 17
+        return (no_update,) * 18
     _load_all(iteration_dir)
     st = _tracker_state()
     with_tracks = LAYER is not None and LAYER.runs
@@ -866,7 +891,7 @@ def _on_iteration(iteration_dir, version):
     return (_sensors_checklist(), _drones_checklist(),
             DURATION, _get_marks(), DURATION, date_txt,
             st["group"], st["opts"], st["value"], st["runs"], st["run"], st["run_style"],
-            _bottom_style(), _summary_children(), _sub_children(), (version or 0) + 1, "")
+            _bottom_style(), _summary_children(), _sub_children(), (version or 0) + 1, "", _orphan_children())
 
 @app.callback(
     Output("sensors", "options"), Output("sensors", "value", allow_duplicate=True),

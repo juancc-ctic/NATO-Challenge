@@ -51,6 +51,17 @@ Sección **Excel de entrega**: carga el Excel que genera `python -m src.cli subm
 - **Pintar el Excel de entrega**: dibuja sus tracks como líneas rosas; el hover muestra clase e identidad tal cual van en el fichero.
 - **Comprobaciones** automáticas (✔ / ! / ✖): cabecera de 19 columnas en orden, rejilla de 100 ms sin saltos, filas con track con lat/lon, covarianzas válidas, clase e identidad con valores admitidos, % relleno (≠ Unknown), posiciones en la zona y que coincide con `tracks.parquet` (verifica la conversión ENU → WGS84).
 
+### Detecciones sin track cercano
+
+Opción **Detecciones sin track cercano (✕)** en "Tracker y comparación": marca con una ✕ (un color por sensor) las detecciones que no tienen ningún track dentro de la puerta del sensor en su instante, es decir, lo que el tracker está ignorando. Usa las mismas reglas y puertas que `labels` (distancia para sensores con posición, ángulo para los de solo rumbo) y funciona también en eval. Los radares se ocultan por defecto (su ruido es lo que el tracker debe ignorar); "… incluir radares" los muestra.
+
+Debajo, una tabla por sensor: detecciones, cuántas sin track y:
+
+- en **test**, "Drones sin track": cuántas detecciones de un dron real (según el etiquetado) no recoge ningún track;
+- en **eval**, "% drones en test": qué parte de lo que detecta ese sensor era un dron real en test. Un sensor fiable con muchas detecciones sin track apunta a drones perdidos.
+
+El cálculo está en `src/compare.py` (`detections_vs_tracks`).
+
 ### Ocultar tracks cortos
 
 Deslizador **Ocultar tracks de menos de (s)** en "Tracker y comparación": oculta los tracks que duran menos que el umbral (suelen ser ruido) para ver qué quedaría si el postfiltro los eliminara. Solo afecta a lo que se dibuja; las métricas siguen usando todos los tracks. El contador de arriba indica cuántos se muestran ("8 de 26 tracks (≥ 30 s)").

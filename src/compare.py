@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 
 from src.evaluate import gospa
-from src.geo import enu_to_geodetic
+from src.geo import angle_difference_deg, enu_to_geodetic
 
 
 def _evaluation_cfg(cfg: Any) -> Mapping[str, Any]:
@@ -207,6 +207,60 @@ def horizontal_ellipse(c_nn: float, c_ne: float, c_ee: float, k: float = 2.0, n_
     angle = np.linspace(0, 2 * np.pi, n_points)
     circle = np.stack([np.cos(angle), np.sin(angle)])
     return (vectors @ (k * np.sqrt(values)[:, None] * circle)).T
+
+
+def detections_vs_tracks(detections: pd.DataFrame, tracks: pd.DataFrame, cfg: Any = None,
+                         grid_ms: int = 100) -> pd.DataFrame:
+    """¿Tiene cada detección algún track cerca en su instante?
+
+    Sirve para ver qué detecciones ignora el tracker (p. ej. una sucesión clara de un
+    sensor cyber sin ningún track alrededor). Usa las mismas reglas y puertas que
+    `src/labels.py`: distancia horizontal para sensores con posición, error de azimut
+    para los de solo rumbo. Funciona también en eval (no necesita GT).
+
+    Devuelve, alineado con el índice de `detections`: `mode` ("pos" | "brg" | None),
+    `err` (m o °, al track más cercano; NaN si no hay tracks en ese instante),
+    `gate`, `near` (True si hay un track dentro de la puerta) y `no_tracks`
+    (True si en ese instante no había ningún track activo).
+    """
+    from src.labels import _sensor_mode  # mismas reglas que el etiquetado
+
+    lcfg = cfg.data.get("labels", {}) if hasattr(cfg, "data") else (cfg or {}).get("labels", {})
+    gate_m = {k: float(v) for k, v in lcfg.get("gate_m", {}).items()}
+    gate_deg = {k: float(v) for k, v in lcfg.get("gate_deg", {}).items()}
+    det = detections.copy()
+    det["pn"] = det["n"].where(det["has_position"], det["raw_n"])
+    det["pe"] = det["e"].where(det["has_position"], det["raw_e"])
+    out = pd.DataFrame(index=det.index, data={"mode": None, "err": np.nan, "gate": np.nan,
+                                              "near": False, "no_tracks": True})
+    if det.empty:
+        return out
+    tr = tracks[["ts_ms", "track_id", "n", "e"]].rename(columns={"ts_ms": "snap", "n": "tn", "e": "te"})
+    times = set(tr["snap"].unique())
+    for _sensor, part in det.groupby("sensor_id"):
+        mode, usable = _sensor_mode(part, lcfg)
+        if mode is None:
+            continue
+        stype = str(part["sensor_type"].iloc[0])
+        gate = gate_m.get(stype) if mode == "pos" else gate_deg.get(stype)
+        part = part[usable].copy()
+        out.loc[part.index, "mode"] = mode
+        out.loc[part.index, "gate"] = gate
+        # Instante del track más cercano en la rejilla del tracker.
+        part["snap"] = (part["ts_ms"] / grid_ms).round().astype("int64") * grid_ms
+        out.loc[part.index, "no_tracks"] = ~part["snap"].isin(times)
+        m = part.reset_index().merge(tr, on="snap", how="inner")
+        if m.empty:
+            continue
+        if mode == "pos":
+            m["err"] = np.hypot(m["pn"] - m["tn"], m["pe"] - m["te"])
+        else:
+            expected = np.degrees(np.arctan2(m["te"] - m["sensor_e"], m["tn"] - m["sensor_n"]))
+            m["err"] = np.abs(angle_difference_deg(m["az_deg"].to_numpy(), expected.to_numpy()))
+        best = m.groupby("index")["err"].min()
+        out.loc[best.index, "err"] = best
+        out.loc[best.index, "near"] = best <= gate
+    return out
 
 
 def run_compare(tracks: pd.DataFrame, ground_truth: pd.DataFrame, cfg: Any = None) -> dict[str, pd.DataFrame]:

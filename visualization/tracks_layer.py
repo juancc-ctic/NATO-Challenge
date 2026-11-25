@@ -24,11 +24,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.compare import add_geodetic, horizontal_ellipse, load_origins, run_compare  # noqa: E402
+from src.compare import (add_geodetic, detections_vs_tracks, horizontal_ellipse, load_origins,  # noqa: E402
+                         run_compare)
 
 _DRONE_RE = re.compile(r"DroneTag_([A-Z]+)_\d{6}_(\d{4})_\d{4}_(.+?)(?:-\d+)?$")
 TRACK_COLORS = ["#ffe066", "#7cf29a", "#c9a2ff", "#5fe1d3", "#ff9de2", "#d9f27c", "#ffc285", "#a0d8ff",
                 "#f7f7f7", "#b5f5c8"]
+# Detecciones sin track: un color por sensor, distintos de los de tracks y drones.
+ORPHAN_COLORS = ["#ff5c5c", "#ff9f1c", "#2ec4b6", "#f15bb5", "#00bbf9", "#c77dff", "#80ed99", "#e9c46a",
+                 "#ef476f", "#06d6a0"]
+DET_COLUMNS = ["row_uid", "split_group", "sensor_id", "sensor_type", "ts_ms", "n", "e", "raw_n", "raw_e",
+               "has_position", "az_deg", "sensor_n", "sensor_e", "has_sensor_location", "lat", "lon", "alt_m",
+               "raw_lat", "raw_lon", "raw_alt_m"]
 
 
 def viewer_drone_key(drone_key: str) -> str:
@@ -62,6 +69,8 @@ class Run:
     colors: dict = field(default_factory=dict)
     compare: dict = field(default_factory=dict)  # tablas de src.compare (vacío si no hay GT)
     durations: pd.Series = field(default_factory=pd.Series)  # duración de cada track (s)
+    orphans: pd.DataFrame = field(default_factory=pd.DataFrame)  # detecciones sin track cerca, coords del visor
+    orphan_stats: pd.DataFrame = field(default_factory=pd.DataFrame)  # resumen por sensor
 
 
 @dataclass
@@ -71,6 +80,7 @@ class TrackLayer:
     gt_has: bool
     labelled: pd.DataFrame                  # detecciones con posición y etiqueta, coords del visor
     gt_view: dict                           # drone_key -> clave de dron del visor
+    sensor_precision: dict = field(default_factory=dict)  # sensor_id -> % de sus detecciones que son drones (test)
 
 
 def _to_view(frame: pd.DataFrame, ds, t0: pd.Timestamp) -> pd.DataFrame:
@@ -82,11 +92,44 @@ def _to_view(frame: pd.DataFrame, ds, t0: pd.Timestamp) -> pd.DataFrame:
     return out
 
 
-def _load_run(name, path, group, origins, gt, ds, t0, cfg) -> Run:
+def _orphans(dets, tracks, cfg, real, precision, ds, t0):
+    """Detecciones sin ningún track cerca (con los tracks completos, a 100 ms) y resumen por sensor."""
+    if dets is None or dets.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    near = detections_vs_tracks(dets, tracks, cfg)
+    d = dets.join(near)
+    d = d[d["mode"].notna()].copy()
+    d["real"] = d["row_uid"].map(real).fillna(False).astype(bool) if real is not None else False
+    rows = []
+    for sid, g in d.groupby("sensor_id"):
+        r = {"Sensor": str(sid).replace("_", " "), "Tipo": str(g.sensor_type.iloc[0]), "Detecciones": len(g),
+             "Sin track": int((~g.near).sum()), "% sin track": float((~g.near).mean() * 100)}
+        if real is not None:
+            dr = g[g.real]
+            r["Drones sin track"] = f"{int((~dr.near).sum())} de {len(dr)}" if len(dr) else "–"
+        else:
+            prec = precision.get(sid)
+            r["% drones en test"] = prec if prec is not None else np.nan
+        rows.append(r)
+    stats = pd.DataFrame(rows).sort_values("Sin track", ascending=False) if rows else pd.DataFrame()
+    # Para dibujar: solo las de sensores con posición (las de solo rumbo no tienen punto).
+    o = d[(d["mode"] == "pos") & ~d["near"]].copy()
+    if len(o):
+        o["lat"] = o["lat"].fillna(o["raw_lat"])
+        o["lon"] = o["lon"].fillna(o["raw_lon"])
+        o["alt_m"] = o["alt_m"].fillna(o["raw_alt_m"])
+        o = o[o.lat.notna() & o.lon.notna()]
+        o = _to_view(o, ds, t0)
+    return o, stats
+
+
+def _load_run(name, path, group, origins, gt, ds, t0, cfg, dets=None, real=None, precision=None) -> Run:
     tracks = pd.read_parquet(path)
     tracks = tracks[tracks.split_group == group].copy()
     tracks["track_id"] = tracks.track_id.astype(str)
     compare = run_compare(tracks, gt, cfg) if len(gt) and len(tracks) else {}
+    orphans, orphan_stats = (_orphans(dets, tracks, cfg, real, precision or {}, ds, t0)
+                             if len(tracks) else (pd.DataFrame(), pd.DataFrame()))
     durations = (tracks.groupby("track_id").ts_ms.agg(lambda x: x.max() - x.min()) / 1000.0) if len(tracks)         else pd.Series(dtype=float)
     # Para dibujar basta 1 punto por segundo y track.
     tracks["sec"] = tracks.ts_ms // 1000
@@ -94,7 +137,8 @@ def _load_run(name, path, group, origins, gt, ds, t0, cfg) -> Run:
     draw = _to_view(add_geodetic(draw, origins), ds, t0)
     ids = sorted(draw.track_id.unique())
     colors = {tid: TRACK_COLORS[i % len(TRACK_COLORS)] for i, tid in enumerate(ids)}
-    return Run(name=name, tracks=draw, colors=colors, compare=compare, durations=durations)
+    return Run(name=name, tracks=draw, colors=colors, compare=compare, durations=durations,
+               orphans=orphans, orphan_stats=orphan_stats)
 
 
 def load_layer(ds, t0, interim: str, split_group: str, tracks_paths: dict, cfg=None) -> TrackLayer:
@@ -103,15 +147,28 @@ def load_layer(ds, t0, interim: str, split_group: str, tracks_paths: dict, cfg=N
     origins = load_origins(interim / "origins.json")
     gt = pd.read_parquet(interim / "ground_truth.parquet")
     gt = gt[gt.split_group == split_group]
-    runs = {name: _load_run(name, p, split_group, origins, gt, ds, t0, cfg) for name, p in tracks_paths.items() if p}
+    det_all = pd.read_parquet(interim / "detections.parquet", columns=DET_COLUMNS)
+    dets = det_all[det_all.split_group == split_group].reset_index(drop=True)
+
+    # Etiquetado (si existe): qué detecciones son de un dron real, y fiabilidad de cada sensor en test.
+    lab_path = interim / "detection_labels.parquet"
+    lab_all = pd.read_parquet(lab_path) if lab_path.exists() else pd.DataFrame()
+    real, precision = None, {}
+    if len(lab_all):
+        t = lab_all[lab_all.split_group.str.startswith("test")
+                    & lab_all.label_status.isin(["matched", "ambiguous", "clutter"])]
+        precision = (t.label_status.isin(["matched", "ambiguous"]).groupby(t.sensor_id).mean() * 100).to_dict()
+        if len(gt):
+            g = lab_all[lab_all.split_group == split_group]
+            real = g.set_index("row_uid").label_status.isin(["matched", "ambiguous"])
+
+    runs = {name: _load_run(name, p, split_group, origins, gt, ds, t0, cfg, dets, real, precision)
+            for name, p in tracks_paths.items() if p}
 
     labelled = pd.DataFrame()
-    lab_path = interim / "detection_labels.parquet"
-    if lab_path.exists():
-        lab = pd.read_parquet(lab_path)
-        lab = lab[lab.split_group == split_group]
-        det = pd.read_parquet(interim / "detections.parquet",
-                              columns=["row_uid", "lat", "lon", "alt_m", "has_position"])
+    if len(lab_all):
+        lab = lab_all[lab_all.split_group == split_group]
+        det = dets[["row_uid", "lat", "lon", "alt_m", "has_position"]]
         lab = lab.merge(det, on="row_uid", how="left")
         lab = lab[lab.has_position.fillna(False) & lab.lat.notna() & lab.lon.notna()]
         if len(lab):
@@ -119,7 +176,41 @@ def load_layer(ds, t0, interim: str, split_group: str, tracks_paths: dict, cfg=N
             labelled["drone_view"] = labelled.label_drone_key.map(
                 lambda k: viewer_drone_key(k) if isinstance(k, str) else None)
     gt_view = {k: viewer_drone_key(k) for k in gt.drone_key.unique()}
-    return TrackLayer(split_group=split_group, runs=runs, gt_has=len(gt) > 0, labelled=labelled, gt_view=gt_view)
+    return TrackLayer(split_group=split_group, runs=runs, gt_has=len(gt) > 0, labelled=labelled, gt_view=gt_view,
+                      sensor_precision=precision)
+
+
+def orphan_traces(go, layer, run_name, t_now, t_lo, zc, z_max, include_radar=False):
+    """Detecciones con posición sin ningún track cerca, con una x del color de su sensor.
+
+    Los radares se excluyen por defecto: su ruido (pájaros, ecos) es lo que el tracker *debe* ignorar.
+    """
+    run = layer.runs.get(run_name)
+    if run is None or run.orphans.empty:
+        return []
+    o = run.orphans[(run.orphans.ts <= t_now) & (run.orphans.ts >= t_lo)]
+    if not include_radar:
+        o = o[o.sensor_type != "radar"]
+    o = o[o[zc].fillna(0) <= z_max]
+    sensors = sorted(run.orphans.sensor_id.unique())
+    colors = {s: ORPHAN_COLORS[i % len(ORPHAN_COLORS)] for i, s in enumerate(sensors)}
+    traces = []
+    for sid, g in o.groupby("sensor_id"):
+        unit = np.where(g["mode"] == "pos", " m", "°")
+        err = np.where(g["no_tracks"], "ningún track activo",
+                       g["err"].round(0).astype("Int64").astype(str).to_numpy() + unit)
+        cols = [err]
+        extra = ""
+        if layer.gt_has:
+            cols.append(np.where(g["real"], "sí (según el etiquetado)", "no consta"))
+            extra = "<br>¿Era un dron real?: %{customdata[1]}"
+        name = str(sid).replace("_", " ")
+        traces.append(go.Scatter3d(
+            x=g.ve, y=g.vn, z=g[zc].fillna(0), mode="markers", meta="orphans",
+            marker=dict(size=3.5, color=colors[sid], symbol="x", opacity=0.9),
+            name=f"Sin track · {name}", customdata=np.stack(cols, -1),
+            hovertemplate=f"<b>Sin track · {name}</b><br>Track más cercano: %{{customdata[0]}}{extra}<extra></extra>"))
+    return traces
 
 
 def track_traces(go, layer: TrackLayer, run_name: str, t_now: float, t_lo: float, zc: str, z_max: float,
