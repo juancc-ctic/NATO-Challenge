@@ -25,6 +25,8 @@ python app.py --iteration "../data/raw/test/Scenario 1/Iteration 1" \
 - `--interim` da el origen ENU, el GT y las etiquetas del ETL.
 - `--tracks` es la salida del tracker. `--tracks-b otro/tracks.parquet` carga un segundo run para comparar (antes/después de un cambio).
 
+También se puede **arrastrar un `tracks.parquet`** al panel "Cargar datos" sin relanzar el visor. Se usa el `split_group` de la iteración abierta y el `--interim` (o `data/interim` del repo) para convertir ENU → lat/lon y comparar con el GT. Si el parquet contiene varias iteraciones, se filtra la actual; si no hay iteración abierta y el fichero tiene un único `split_group`, se usa ese.
+
 Qué añade:
 
 | En el panel lateral "Tracker y comparación" | Qué se ve |

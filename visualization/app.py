@@ -113,6 +113,14 @@ def _cfg():
         return {}
 
 
+def _interim_dir():
+    """Interim a usar para GT, orígenes y etiquetas; por defecto el del repo."""
+    if args.interim:
+        return args.interim
+    default = os.path.join(TL.ROOT, "data", "interim")
+    return default if os.path.exists(os.path.join(default, "origins.json")) else None
+
+
 def _load_layer():
     """Carga tracks, comparación y etiquetas si se pasó --interim (y --tracks para los tracks)."""
     global LAYER
@@ -410,6 +418,15 @@ def section(title, *children):
     return html.Div([html.Div(title, className="sec-title"), *children], className="section")
 
 
+def upload_box(title, hint):
+    return html.Div([
+        html.Div("Drag & Drop", style={"fontSize": "12px", "fontWeight": 600, "color": TEXT}),
+        html.Div(title, style={"fontSize": "12px", "color": TEXT, "marginTop": "2px"}),
+        html.Div(hint, className="help", style={"fontSize": "10px", "marginTop": "2px"}),
+    ], style={"border": "1.5px dashed #3a4855", "borderRadius": "10px", "padding": "10px 8px",
+               "textAlign": "center", "background": "#1b242c", "cursor": "pointer"})
+
+
 def _get_sensor_options():
     return [{"label": html.Span([html.Span(s.key), html.Span(f"  {len(s.df)}" + (" · marcación" if s.bearing_only else ""), className="sub", style={"fontSize": "11px"})]),
             "value": k} for k, s in DS.sensors.items()]
@@ -651,11 +668,19 @@ def serve_layout():
             section("Cargar datos",
                     dcc.Upload(
                         id="upload-data",
-                        children=html.Button("＋ Add sensor / drone CSV", className="btn", style={"width": "100%"}),
+                        children=upload_box("Sensor / drone CSV", "o clic para elegir varios"),
                         multiple=True,
                         accept=".csv"
                     ),
-                    html.Div(id="upload-status", className="help", style={"marginTop": "4px"})),
+                    html.Div(id="upload-status", className="help", style={"marginTop": "4px"}),
+                    dcc.Upload(
+                        id="upload-tracks",
+                        children=upload_box("tracks.parquet", "o clic para elegir uno"),
+                        multiple=False,
+                        accept=".parquet",
+                        style={"display": "block", "marginTop": "8px"}
+                    ),
+                    html.Div(id="tracks-upload-status", className="help", style={"marginTop": "4px"})),
 
             section("Reproducción",
                     html.Div([
@@ -873,6 +898,46 @@ def _update_cmp(t, run_name, _version):
     return fig
 
 
+def _apply_uploaded_tracks(contents, filename):
+    """Carga un tracks.parquet subido y actualiza LAYER; devuelve el estado textual."""
+    global LAYER
+    if not contents:
+        return "Sin fichero."
+    interim = _interim_dir()
+    if not interim:
+        return "No hay data/interim/origins.json; lanza el visor con --interim."
+    try:
+        _, content_string = contents.split(",", 1)
+        tracks = pd.read_parquet(io.BytesIO(base64.b64decode(content_string)))
+    except Exception as exc:
+        return f"Error leyendo {filename}: {exc}"
+    group = LAYER.split_group if LAYER is not None else (
+        TL.infer_split_group(ITERATION_DIR) if ITERATION_DIR else None)
+    if group is None and "split_group" in tracks.columns:
+        groups = [str(value) for value in tracks["split_group"].dropna().unique()]
+        if len(groups) == 1:
+            group = groups[0]
+    if group is None:
+        return "No se pudo deducir split_group; abre una iteración o sube un parquet con una sola."
+    try:
+        origins = TL.load_origins_for(interim)
+        gt = TL.load_gt_for(interim, group)
+        run = TL.load_run_frame("A", tracks, group, origins, gt, DS, T0, _cfg())
+    except Exception as exc:
+        return f"Error cargando tracks: {exc}"
+    if run.tracks.empty:
+        return f"El parquet no tiene filas para {group}."
+    if LAYER is None:
+        gt_view = {key: TL.viewer_drone_key(key) for key in gt.drone_key.unique()}
+        LAYER = TL.TrackLayer(split_group=group, runs={"A": run}, gt_has=len(gt) > 0,
+                              labelled=pd.DataFrame(), gt_view=gt_view)
+    else:
+        LAYER.runs["A"] = run
+        LAYER.gt_has = LAYER.gt_has or len(gt) > 0
+    _CMP_CACHE.clear()
+    return f"Cargado {filename}: {run.tracks.track_id.nunique()} tracks · {group}"
+
+
 @app.callback(
     Output("sensors-wrap", "children"), Output("drones-wrap", "children"),
     Output("time", "max", allow_duplicate=True), Output("time", "marks", allow_duplicate=True),
@@ -881,23 +946,31 @@ def _update_cmp(t, run_name, _version):
     Output("run", "options"), Output("run", "value"), Output("run-wrap", "style"),
     Output("bottom", "style"), Output("summary", "children"), Output("sub-info", "children"),
     Output("iter-version", "data"), Output("iter-loading", "children"), Output("orphan-info", "children"),
-    Input("iteration", "value"), State("iter-version", "data"),
+    Output("tracks-upload-status", "children"),
+    Input("iteration", "value"), Input("upload-tracks", "contents"),
+    State("upload-tracks", "filename"), State("iter-version", "data"),
     prevent_initial_call=True,
 )
-def _on_iteration(iteration_dir, version):
-    """Cambia de iteración sin relanzar: recarga todo y actualiza los controles."""
+def _on_iteration(iteration_dir, upload_contents, upload_filename, version):
+    """Cambia de iteración o carga un tracks.parquet sin relanzar el visor."""
+    if ctx.triggered_id == "upload-tracks":
+        status = _apply_uploaded_tracks(upload_contents, upload_filename)
+        st = _tracker_state()
+        return (no_update, no_update, no_update, no_update, no_update, no_update,
+                st["group"], st["opts"], st["value"], st["runs"], st["run"], st["run_style"],
+                _bottom_style(), _summary_children(), _sub_children(), (version or 0) + 1,
+                no_update, no_update, status)
     if not iteration_dir or iteration_dir == ITERATION_DIR:
-        return (no_update,) * 18
+        return (no_update,) * 19
     _load_all(iteration_dir)
     st = _tracker_state()
-    with_tracks = LAYER is not None and LAYER.runs
     date_txt = f"{T0:%d/%m/%Y} · {DS.t0:%H:%M:%S}–{DS.t1:%H:%M:%S} UTC"
     # Se devuelven las listas enteras (no solo sus opciones): Dash dejaba sin nombre las opciones
     # nuevas con etiquetas compuestas, y solo se veían las de sensores comunes a ambas iteraciones.
     return (_sensors_checklist(), _drones_checklist(),
             DURATION, _get_marks(), DURATION, date_txt,
             st["group"], st["opts"], st["value"], st["runs"], st["run"], st["run_style"],
-            _bottom_style(), _summary_children(), _sub_children(), (version or 0) + 1, "", _orphan_children())
+            _bottom_style(), _summary_children(), _sub_children(), (version or 0) + 1, "", _orphan_children(), "")
 
 @app.callback(
     Output("sensors", "options"), Output("sensors", "value", allow_duplicate=True),

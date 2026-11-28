@@ -141,6 +141,36 @@ def _load_run(name, path, group, origins, gt, ds, t0, cfg, dets=None, real=None,
                orphans=orphans, orphan_stats=orphan_stats)
 
 
+def load_run_frame(name, tracks, group, origins, gt, ds, t0, cfg) -> Run:
+    """Construye un `Run` a partir de un DataFrame de tracks ya cargado."""
+    tracks = tracks.copy()
+    if "split_group" in tracks.columns:
+        tracks = tracks[tracks["split_group"].astype(str) == str(group)].copy()
+    if tracks.empty:
+        return Run(name=name, tracks=pd.DataFrame(), colors={}, compare={}, durations=pd.Series(dtype=float))
+    tracks["track_id"] = tracks["track_id"].astype(str)
+    compare = run_compare(tracks, gt, cfg) if len(gt) and len(tracks) else {}
+    durations = (tracks.groupby("track_id").ts_ms.agg(lambda x: x.max() - x.min()) / 1000.0)
+    # Para dibujar basta 1 punto por segundo y track.
+    tracks["sec"] = tracks.ts_ms // 1000
+    draw = tracks.sort_values("ts_ms").drop_duplicates(["track_id", "sec"])
+    draw = _to_view(add_geodetic(draw, origins), ds, t0)
+    ids = sorted(draw.track_id.unique())
+    colors = {tid: TRACK_COLORS[i % len(TRACK_COLORS)] for i, tid in enumerate(ids)}
+    return Run(name=name, tracks=draw, colors=colors, compare=compare, durations=durations)
+
+
+def load_origins_for(interim: str):
+    """Carga `origins.json` del interim para reproyectar tracks ENU."""
+    return load_origins(Path(interim) / "origins.json")
+
+
+def load_gt_for(interim: str, split_group: str) -> pd.DataFrame:
+    """Carga el GT de una iteración concreta desde el interim."""
+    gt = pd.read_parquet(Path(interim) / "ground_truth.parquet")
+    return gt[gt.split_group == split_group]
+
+
 def load_layer(ds, t0, interim: str, split_group: str, tracks_paths: dict, cfg=None) -> TrackLayer:
     """Carga runs, comparación y detecciones etiquetadas de una iteración."""
     interim = Path(interim)
