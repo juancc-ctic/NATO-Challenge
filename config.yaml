@@ -106,6 +106,38 @@ splits:
   leave_one_iteration_out: true
   random_state: 42
 
+# Prefiltro de detecciones, paso previo al tracker. Los filtros se combinan
+# con AND: una detección se descarta si incumple cualquiera de ellos.
+prefilter:
+  # --- Método y radio ---
+  method: range                 # none: sin filtro de distancia | range: usa max_range_m
+  max_range_m: 5000.0           # metros desde el origen ENU; solo position
+
+  # --- Limpieza común ---
+  drop_fusion: true             # quita nodos fusion (solo test)
+  drop_non_drone: true          # quita pájaros, animales, coches, etc.
+
+  # --- Filtros por clase ---
+  drop_class_norm:              # class_norm a descartar; vacío: no filtra
+    - Unknown                   # Unknown: mayor lastre de cardinalidad en radar
+  drop_class_norm_by_sensor: {} # {radar: [Unknown], ...}; vacío: no filtra
+
+  # --- Filtros por sensor ---
+  drop_sensor_types:            # tipos a descartar; vacío: no filtra
+    - cyber                     # radar|cyber|fusion|other|rf|acoustic|camera
+  keep_sensor_types: []         # si no vacío, conserva SOLO estos; gana a drop
+
+  # --- Filtros por score ---
+  min_det_conf: 0.9            # [0,1] confianza mínima de detección; null no filtra
+  min_class_conf: null          # [0,1] confianza mínima de clase; null no filtra
+  min_det_conf_by_sensor: {}    # {radar: 0.9, ...}; vacío: no filtra
+  max_det_conf_by_sensor: {}    # {radar: 0.999, ...}; vacío: no filtra
+
+  # --- Filtros por altitud ---
+  max_alt_m: null               # metros; null no filtra; solo position
+  min_alt_m: null               # metros; null no filtra; solo position
+  # Futuro: outliers por saltos de velocidad/aceleración.
+
 # Parámetros del tracker EKF.
 # Baseline congelado: no cambiar valores sin registrar el experimento
 # en README §Tracking. Cada cambio se valida en folds de `test`, uno a la vez.
@@ -119,18 +151,6 @@ tracker:
   # Emite también tracks tentative.
   # false: no se emiten tentative; GOSPA baja y los ID switches caen.
   output_tentative: false
-  # Prefiltro de detecciones, paso previo al tracking.
-  prefilter:
-    # none | range
-    method: range
-    # Descarta ecos de posición más lejanos que este radio, en metros.
-    max_range_m: 5000.0
-    # Excluye nodos de fusión y sensores solo-test.
-    drop_fusion: true
-    # Excluye detecciones clasificadas como no-dron.
-    drop_non_drone: true
-    # Futuro: outliers por saltos de velocidad/aceleración, max_alt_m,
-    # min_det_conf y filtros por clase o sensor.
   # Movimiento y ruido de proceso.
   motion:
     model: constant_velocity

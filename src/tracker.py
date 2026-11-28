@@ -52,7 +52,11 @@ def _tracker_config(cfg: Any) -> Mapping[str, Any]:
     Pertenece a orquestación: solo resuelve parámetros.
     """
     if hasattr(cfg, "data"):
-        return cfg.data.get("tracker", {}) or {}
+        tracker_cfg = dict(cfg.data.get("tracker", {}) or {})
+        for key in ("prefilter", "postfilter"):
+            if key in cfg.data:
+                tracker_cfg[key] = cfg.data[key]
+        return tracker_cfg
     return cfg if isinstance(cfg, Mapping) else {}
 
 

@@ -227,17 +227,19 @@ $$
 
 ### Prefiltro
 
-Está en `src/prefilter.py` y se ejecuta antes de la predicción. Su función genérica `preprocess_detections` delega en un método concreto (`range` o `none`).
+Está en `src/prefilter.py` y se configura en el grupo top-level `prefilter:` de `config.yaml`. Se ejecuta antes de la predicción; su función genérica `preprocess_detections` delega en un método concreto (`range` o `none`).
 
-La limpieza común elimina nodos de fusión (`fusion`, solo test), detecciones no-dron y medidas sin posición ni azimut utilizables. El método `range` descarta ecos de posición fuera del radio del escenario:
+La limpieza común elimina nodos de fusión (`fusion`, solo test), detecciones no-dron y medidas sin posición ni azimut utilizables. Además puede filtrar por configuración: clase (`drop_class_norm`), clase por sensor (`drop_class_norm_by_sensor`), tipo de sensor (`drop_sensor_types`, `keep_sensor_types`), confianza de detección global o por sensor (`min_det_conf`, `min_det_conf_by_sensor`, `max_det_conf_by_sensor`), confianza de clase (`min_class_conf`) y altitud (`max_alt_m`, `min_alt_m`). El método `range` descarta ecos de posición fuera del radio del escenario:
 
 $$
 r_k = \sqrt{n_k^2 + e_k^2} \leq r_{\max}
 $$
 
-donde $r_{\max}$ es `tracker.prefilter.max_range_m`. Las medidas solo-azimut no se filtran por rango porque no tienen posición.
+donde $r_{\max}$ es `prefilter.max_range_m`. Las medidas solo-azimut no se filtran por rango porque no tienen posición.
 
-El prefiltro podría ampliarse con outliers de saltos de velocidad o aceleración, altura máxima, confianza mínima de detección y filtros por clase o sensor. Es un paso de limpieza de datos, no de estimación: no usa `F`, `Q`, `H` ni `R`.
+El prefiltro podría ampliarse con outliers de saltos de velocidad o aceleración. Es un paso de limpieza de datos, no de estimación: no usa `F`, `Q`, `H` ni `R`.
+
+**Fiabilidad de los scores y de los sensores** (`test`, etiquetas `matched` frente a `clutter`): la confianza de detección no es monótona en radar. Los valores `det_conf=1.0` son en gran parte el relleno de “no reportado” y solo el 5.8 % empareja, frente al 42 % de `0.95–0.99` y el 39 % de `0.90–0.95`; el AUC es 0.49. En cámara el AUC es 0.58 y en `class_conf` de radar 0.59, así que tampoco sirve como score fiable. La señal útil es el sensor y la clase: radar `Unknown` empareja el 2.9 %, `Fixed Wing` el 36 % y `Rotary Wing` el 48 %; cámara `Unknown` el 27 % frente al 54–60 % con clase dron; acústico `Unknown` el 73 %; RF `Unknown` el 5 % frente al 39 % `Rotary Wing`. Por sensor, la tasa de acierto varía de 0 % a 86 % (p. ej. `Delta_EGOI` 3 %, `Charlie_UXYJ` 43 %, `Bravo_WVFX` 96 %), así que el score por detección no basta: el tipo de sensor y la clase son más informativos.
 
 ### Movimiento: $F$ (modelo de movimiento) y $Q$ (ruido del proceso)
 
@@ -368,8 +370,11 @@ Es opcional y está en `src/postfilter.py`; se aplica después del remuestreo, s
   $$
   v_k = \frac{\lVert p_k - p_{k-1}\rVert}{\Delta t} > v_{\max}
   $$
+- `tube_merge`: fusiona tracks que caen dentro del tubo de otro. Para cada par con solape temporal ≥ `min_time_overlap_s`, aproxima el tubo por esferas de radio `radius_m` en los puntos de la rejilla y calcula la fracción del track corto que queda dentro del otro. Si supera `min_overlap_ratio`, se consideran el mismo y se conserva uno según `keep` (`longest`, `hits` o `lower_sigma`).
 
-El relleno de huecos no sustituye al remuestreo: el remuestreo predice con `F`, mientras que `fill_gaps` interpola observaciones. El suavizado y el filtro de plausibilidad son opcionales porque pueden sesgar o eliminar tracks reales; se activan solo tras validarlos en test. Una mejora futura es un suavizado RTS sobre el estado completo, que necesita guardar velocidad y covarianzas de predicción.
+![tube_merge: tubo 3D y decisión de conservar o eliminar cada track](assets/tube_merge.png)
+
+El orden importa: cada paso recibe la salida del anterior. El relleno de huecos no sustituye al remuestreo: el remuestreo predice con `F`, mientras que `fill_gaps` interpola observaciones. El suavizado y el filtro de plausibilidad son opcionales porque pueden sesgar o eliminar tracks reales; se activan solo tras validarlos en test. `tube_merge` tampoco está activo en el baseline: con `radius_m=25–50` solo fusiona 13 tracks y no cambia el GOSPA; con 200 m fusiona 28 y baja a 79.08, pero puede juntar drones reales cercanos. Una mejora futura es un suavizado RTS sobre el estado completo, que necesita guardar velocidad y covarianzas de predicción.
 
 ### Geometría y observabilidad: $J$ (matriz de información)
 
@@ -424,19 +429,19 @@ La métrica principal interna es **`GOSPA(c=50 m, p=2)`**. Con `c=50`, cada GT n
 
 ### Diagnóstico reproducible
 
-`python scripts/diagnose_tracking.py` escribe `reports/tracking_diagnostics.csv` y `.json` con GOSPA `c=50`/`c=100`, descomposición, cobertura, duplicados y vida de tracks. No toca el tracker ni `config.yaml`.
+`python scripts/diagnose_tracking.py` escribe `reports/tracking_diagnostics.csv` y `.json` con GOSPA `c=50`/`c=100`, descomposición, cobertura, duplicados y vida de tracks. La cobertura GT→detección se calcula sobre detecciones crudas, antes del prefiltro. No toca el tracker ni `config.yaml`.
 
-**Baseline actual** (hash `230fd13107951daf`):
+**Baseline actual** (hash `0f3e186e9e6e7886`): prefiltro con `drop_class_norm: [Unknown]`, `min_det_conf: 0.9` y `drop_sensor_types: [cyber]`.
 
 | Grupo | GOSPA c=50 | GOSPA c=100 | Recall c=50 | Falsos c=50 | ID switches |
 |---|---:|---:|---:|---:|---:|
-| S1:I1 | 73.1 | 136.3 | 0.239 | 0.560 | 6 |
-| S2:I2 | 85.2 | 161.0 | 0.129 | 0.786 | 16 |
-| S3:I1 | 90.7 | 178.5 | 0.045 | 0.905 | 4 |
-| S3:I2 | 91.5 | 177.3 | 0.079 | 0.888 | 11 |
-| S3:I3 | 79.7 | 153.6 | 0.086 | 0.896 | 13 |
-| S4:I4 | 106.4 | 200.7 | 0.087 | 0.865 | 11 |
-| **Media** | **87.8** | **167.9** | **0.111** | **0.817** | — |
+| S1:I1 | 69.6 | 131.2 | 0.173 | 0.436 | 8 |
+| S2:I2 | 78.1 | 144.6 | 0.171 | 0.520 | 9 |
+| S3:I1 | 84.1 | 157.9 | 0.083 | 0.793 | 28 |
+| S3:I2 | 82.5 | 153.1 | 0.115 | 0.763 | 12 |
+| S3:I3 | 70.4 | 133.9 | 0.125 | 0.776 | 17 |
+| S4:I4 | 89.8 | 167.2 | 0.151 | 0.473 | 9 |
+| **Media** | **79.1** | **148.0** | **0.136** | **0.627** | — |
 
 La descomposición completa (RMSE, GT/ts, tracks/ts, missed/ts, false/ts) está en `reports/tracking_diagnostics.csv`; no se repite aquí.
 
@@ -445,8 +450,11 @@ La métrica `c=50` es la principal. El baseline a `c=100` queda solo como refere
 **Hallazgos que explican el GOSPA**:
 
 - Cobertura GT→detección de posición: 16–39 % a ≤50 m y 28–54 % a ≤100 m; precisión de detección a ≤50 m: 1–14 %. El detalle por grupo está en `reports/tracking_diagnostics.csv`.
+- Cardinalidad: el 95 % del GOSPA es penalización por GT no detectado y tracks falsos; solo el 5 % es error de localización. El 72 % de los tracks no se acerca nunca a ≤50 m de un GT; el 28 % sí.
 - Solo-azimut: 0–88 % del GT tiene un bearing a ≤5°, pero solo 0–5 % tiene ≥2 sensores; la triangulación simultánea no es viable.
-- Tracks: ~500 IDs emitidos, mediana de vida 82–380 muestras; ~99.6 % `coast` y <0.5 % `confirmed`; no se emiten `tentative`.
+- Tracks: 514 IDs en total (103 en `test`), mediana de vida 10 s; ~99.9 % `coast` y ~0.1 % `confirmed`; no se emiten `tentative`.
+- Líneas verticales: no son sensores direccionales. Son saltos de altitud del radar. Sin prefiltro había 290 tracks con saltos >20 m en 100 ms y 245 de los 275 saltos >50 m eran radar; con el prefiltro actual bajan a 77 tracks y 49 saltos >50 m. El radar tiene 19 % de `|u|>200 m` y máximos >11 km. Los solo-azimut no tocan `u`.
+- Líneas radiales: sí vienen de los sensores direccionales (cámara/acústico/RF). El 40 % de los tracks está a <2° de un sensor solo-azimut; en tracks largos y fantasma sube al 63 % a <5°. Al no observar rango, el track se desliza sobre la visual del sensor.
 - Duplicados: 65 196 copias extra detectadas; el ETL ya las reduce a 161.
 - Altitud: GT `u` 3–123 m; tracks con medias 139–593 m y máximos >11 000 m.
 
@@ -475,7 +483,9 @@ Probado y revertido: `merge_distance` 15/25/50, `hits_to_confirm` 2/4, `chi2_gat
 - **Iniciación**: 2 sensores dentro de 0.25 s y 30 m; los `Unknown` necesitan 5 hits para confirmar. Corregido.
 - **Merge**: `merge_distance_m=100` puede fusionar drones reales. En S3:I1 el 52 % de los timestamps tiene dos GT a menos de 100 m; aun así, 100 da mejor GOSPA que 15/25/50.
 - **Evaluación**: no se emiten `tentative`; `coast` se emite hasta `max_coast_s=3`. `_positions` usa `nan_to_num(u=0)`.
-- **Solo-azimut**: en el baseline no inicia tracks. La triangulación simultánea casi nunca es posible (0–5 % de timestamps con ≥2 sensores a ≤5°); la vía probada es tracking temporal con prior de rango, y empeora GOSPA.
+- **Solo-azimut**: en el baseline no inicia tracks. La triangulación simultánea casi nunca es posible (0–5 % de timestamps con ≥2 sensores a ≤5°); la vía probada es tracking temporal con prior de rango, y empeora GOSPA. Sus actualizaciones sí deforman tracks existentes y generan líneas radiales.
+- **Altitud radar**: `u` es la componente más ruidosa; filtrar `|u|>200 m` empeora el GOSPA (87.87) porque también quita detecciones verdaderas. El problema no es solo el filtro, sino el modelo de medida.
+- **Tracks fantasma**: 259 tracks falsos en el baseline actual, con 142 `Fixed Wing` y 117 `Rotary Wing`; los más largos superan 250 s. Son radar con clase dron, no `Unknown`.
 - **S4:I4** es el grupo más difícil: 24 % de cobertura de posición a ≤50 m y 2 % de bearing a ≤5°. Sin otra fuente de datos, no es realista bajarlo a 50 m.
 
 ### Decisiones y notas
@@ -484,7 +494,7 @@ Probado y revertido: `merge_distance` 15/25/50, `hits_to_confirm` 2/4, `chi2_gat
 - **README = fuente única de verdad**: lo obsoleto se borra o reescribe; el histórico vive en git.
 - **Un cambio cada vez**, validación en folds de `test`, `eval` solo al final.
 - Estado 3D CV; no se emiten `tentative`; `coast` hasta 3 s.
-- Prefiltro `range` a 5 km; ETL con dedup natural y filtro de velocidad >90 m/s.
+- Prefiltro `range` a 5 km más `drop_class_norm: [Unknown]`, `min_det_conf: 0.9` y `drop_sensor_types: [cyber]`; ETL con dedup natural y filtro de velocidad >90 m/s.
 - Iniciación con 2 sensores en 0.25 s y 30 m; `Unknown` requiere 5 hits.
 - `σ_az` calibrado con labels; `q`, gating y `merge_distance` ya están probados.
 - Solo-azimut probado y descartado como mejora; flag `initiate_from_bearing` desactivado.
@@ -501,9 +511,9 @@ Probado y revertido: `merge_distance` 15/25/50, `hits_to_confirm` 2/4, `chi2_gat
 
 ### Estado actual
 
-- **Hecho**: diagnóstico reproducible, dedup natural, filtro de velocidad >90 m/s, `status` en rejilla, calibración de movimiento/gating, no emitir `tentative`, `max_coast_s=3` e iniciación multisensor temporal.
-- **Baseline**: **87.76** a `c=50` con sigmas calibrados; el 83.78 anterior usaba sigmas ajustados a GOSPA.
-- **Pendiente**: congelar, ejecutar `eval` y entregar. Solo-azimut ya está probado y descartado como mejora.
+- **Hecho**: diagnóstico reproducible, dedup natural, filtro de velocidad >90 m/s, `status` en rejilla, calibración de movimiento/gating, no emitir `tentative`, `max_coast_s=3` e iniciación multisensor temporal. Prefiltro configurable por clase, sensor, confianza y altitud.
+- **Baseline**: **79.09** a `c=50` con `drop_class_norm: [Unknown]`, `min_det_conf: 0.9` y `drop_sensor_types: [cyber]`; sin prefiltro era 87.76 y con sigmas ajustados a GOSPA 83.78.
+- **Pendiente**: reducir tracks fantasma de radar con clase dron y congelar para `eval`. Solo-azimut ya está probado y descartado como mejora; sus actualizaciones siguen generando líneas radiales.
 
 ## Clasificación
 
@@ -557,11 +567,11 @@ python app.py --iteration "../data/raw/test/Scenario 1/Iteration 1" \
               --interim ../data/interim --tracks ../reports/tracks.parquet [--tracks-b otro/tracks.parquet]
 ```
 
-Informe HTML con lo mismo para todas las iteraciones de test: `python scripts/compare_report.py` (→ `reports/compare_tracks.html`). Detalle en [`visualization/README.md`](visualization/README.md).
+También se puede arrastrar un `tracks.parquet` al panel **Cargar datos** del visor para superponerlo sin relanzar; usa el `split_group` de la iteración abierta y `data/interim` para el origen ENU y el GT. Informe HTML con lo mismo para todas las iteraciones de test: `python scripts/compare_report.py` (→ `reports/compare_tracks.html`). Detalle en [`visualization/README.md`](visualization/README.md).
 
 ## Configuración
 
-Todos los parámetros están en `config.yaml`. La métrica principal de tracking es `GOSPA(c=50 m, p=2)`; `gospa_c_reference_m: 100.0` se usa solo como comparación histórica.
+Todos los parámetros están en `config.yaml`. `prefilter`, `tracker` y `postfilter` son grupos top-level separados: el prefiltro y el postfiltro no son parámetros internos del EKF. La métrica principal de tracking es `GOSPA(c=50 m, p=2)`; `gospa_c_reference_m: 100.0` se usa solo como comparación histórica.
 
 El diagnóstico reproducible del baseline se obtiene con `python scripts/diagnose_tracking.py` y queda en `reports/tracking_diagnostics.csv` y `.json`.
 
@@ -572,23 +582,27 @@ Criterio: un default se acepta si sale de una medida del dataset, de una cota f�
 - **`σ` de sensor**: reportado por detección; si falta, calibrado con detecciones de `test` emparejadas al GT. No se ajusta con GOSPA.
 - **Movimiento, gating y ciclo de vida**: ajustados en `test`.
 - **Pesos de asociación y `max_tentative_misses`**: pendientes de ajustar.
-- **Postfiltro, geometría y clasificación**: inactivos o placeholders.
+- **Postfiltro y geometría**: implementados pero inactivos en el baseline; **clasificación**: placeholder.
 - **Límites de `σ`, radio y velocidad**: cotas físicas/geométricas del escenario.
+- **Prefiltro**: activo en el baseline; quita `Unknown`, `cyber` y detecciones con `det_conf<0.9`. El resto de filtros queda disponible pero desactivado.
+- **Scores de sensor**: `det_conf` y `class_conf` no son fiables por detección; el tipo de sensor y la clase normalizada sí discriminan.
 
-La calibración de `σ` usa `test` (único GT) y no se ajusta con GOSPA; el coste es GOSPA 87.76 frente a 83.78 del baseline anterior, aceptado por robustez. Con datos o sensores nuevos hay que recalibrar.
+La calibración de `σ` usa `test` (único GT) y no se ajusta con GOSPA; sin prefiltro cuesta 87.76 frente a 83.78 del baseline anterior, aceptado por robustez. Con el prefiltro actual el baseline es 79.09. Con datos o sensores nuevos hay que recalibrar.
 
 ## TODO
 
 Hecho: auditoría, diagnóstico reproducible, README sincronizado, `evaluation.gospa_c_m=50`, dedup natural, filtro de velocidad, `status` en la rejilla, calibración de movimiento/gating, ciclo de vida e iniciación multisensor. Pendiente:
 
+- Reducir los tracks fantasma largos de radar con clase dron; el siguiente paso es tocar confirmación/asociación, no el prefiltro.
 - Solo-azimut como validación de tracks de posición (usar bearings para confirmar/descartar), no como fuente de tracks.
 - `u` ausente: no hay nulos en tracks ni en GT, así que `nan_to_num(u=0)` no se activa; no es una medida necesaria.
 - Robustecer `σ` con enfoque jerárquico (prior por tipo + partial pooling por `sensor_id`), validación NIS/NEES y colas pesadas, con validación leave-one-sensor-out.
 - `reports/labels/` también da latencias, clutter, pureza de tracks, etiquetas de clasificación/identidad y GT estáticos: útiles, pero no críticos ahora.
 - Validar `σ_az` con residuos y valorar UKF/CA/IMM y selección geométrica.
 - Añadir RTS como postfiltro opcional; solo reduce localización, no cardinalidad.
+- Ajustar `tube_merge` si se quiere usar: con radios conservadores no cambia GOSPA; con radios grandes puede fusionar drones reales.
 - Congelar `config.yaml`, ejecutar `eval` una vez, generar los 3 Excel y cerrar el README.
 - Resolver clasificación, identificación y metadatos: votar por track, decidir amigo/enemigo por serial y rellenar la ficha técnica (modelo, protocolo, banda).
-- Conectar `det_conf` y `class_conf` al flujo: prefiltro, coste de asociación o peso de `R`, y voto de clasificación.
+- `det_conf` ya filtra en el prefiltro; queda conectarlo al coste de asociación o al peso de `R`, y `class_conf` al voto de clasificación.
 - Añadir tests automáticos con pytest.
 - Crear el documento compartido (p. ej. Drive) con brainstorming de familias de modelos por tarea, incluyendo **prefiltro**, **postfiltro**, **feature engineering**, reglas analíticas, **modelos**, reducción/filtrado, zoo de candidatos, **SOTA** e ideas a mantener/descartar.
