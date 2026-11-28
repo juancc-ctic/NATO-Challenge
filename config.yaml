@@ -231,22 +231,33 @@ tracker:
     bearing_init_range_sigma_m: 1000.0
     # Altitud previa de un track solo-azimut, en metros.
     bearing_init_altitude_m: 50.0
-  # Postfiltro opcional de los tracks finales.
-  # Inactivo en el baseline; sus parámetros son placeholders.
-  postfilter:
-    # none | fill_gaps | moving_average | plausibility
-    method: none
-    # Ventana del suavizado, en número de muestras.
-    smooth_window: 5
-    # Hueco máximo que se rellena por interpolación, en ms.
-    max_gap_ms: 1000
-    # Velocidad máxima plausible; descarta el track si la supera, en m/s.
-    max_speed_mps: 90.0
   # Prefiltro/diagnóstico geométrico; no altera el baseline si está desactivado.
   geometry:
     enabled: false
     selection: greedy_logdet
     rank_tolerance: 1.0e-9
+
+# Postfiltro opcional de los tracks finales, después del remuestreo.
+# Inactivo en el baseline; los métodos están disponibles pero no activados.
+postfilter:
+  # --- Pasos a aplicar, en orden ---
+  # Lista vacía: no toca los tracks. Se pueden combinar varios pasos, p. ej.
+  # [fill_gaps, moving_average, plausibility, tube_merge].
+  methods: []
+
+  # --- Parámetros de cada paso ---
+  smooth_window: 5              # muestras de la media móvil (moving_average)
+  max_gap_ms: 1000              # ms de hueco máximo a interpolar (fill_gaps)
+  max_speed_mps: 90.0           # m/s; descarta track si lo supera (plausibility)
+
+  # --- tube_merge: tubo/capsula alrededor del track ---
+  # El tubo se aproxima por esferas de radio radius_m en cada punto de la rejilla.
+  tube_merge:
+    radius_m: 25.0              # radio del tubo, en metros
+    min_overlap_ratio: 0.8      # fracción del track corto dentro del otro tubo
+    min_time_overlap_s: 2.0     # solape temporal mínimo para comparar, en s
+    min_points: 5               # puntos mínimos por track para comparar
+    keep: longest               # longest | hits | lower_sigma
 
 # Pesos y umbrales para clasificar por voto de sensores.
 # Placeholder: el tracker actual no usa esta sección.

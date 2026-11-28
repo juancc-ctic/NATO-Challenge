@@ -359,7 +359,7 @@ Se usa la forma de Joseph para mantener $P$ simétrica y definida positiva.
 
 ### Postfiltro
 
-Es opcional y está en `src/postfilter.py`; se aplica después del remuestreo, sobre la rejilla de salida, y por defecto `tracker.postfilter.method: none`, así que no altera el baseline. Métodos disponibles:
+Es opcional, está en `src/postfilter.py` y se configura en el grupo top-level `postfilter:` de `config.yaml`. Se aplica después del remuestreo, sobre la rejilla de salida. `postfilter.methods` es una lista ordenada y sus pasos no son excluyentes: se pueden combinar, por ejemplo `[fill_gaps, moving_average, plausibility, tube_merge]`. Por defecto `methods: []`, así que no altera el baseline. Pasos disponibles:
 
 - `fill_gaps`: reindexa cada track en la rejilla y interpola linealmente huecos de hasta `max_gap_ms`; la covarianza se arrastra.
 - `moving_average`: suaviza `n,e,u` con media móvil centrada de ventana `smooth_window`:
@@ -467,10 +467,24 @@ La métrica `c=50` es la principal. El baseline a `c=100` queda solo como refere
 | No emitir `tentative` | 87.10 | 0.109 | 0.811 | mantener |
 | `max_coast_s=3` | 85.41 | 0.107 | 0.787 | mantener |
 | Iniciación multisensor (0.25 s, 30 m, 5 hits Unknown) | 83.78 | 0.107 | 0.778 | baseline anterior |
-| Sigmas calibrados (labels) | **87.76** | 0.111 | 0.817 | mantener por robustez |
+| Sigmas calibrados (labels) | 87.76 | 0.111 | 0.817 | baseline anterior sin prefiltro |
 | Sigmas MAD (`479bfab`) | 88.84 | 0.107 | 0.830 | descartar: labels mejora |
+| Drop solo-azimut (cámara/acústico/RF) | 87.13 | 0.119 | 0.800 | no basta |
+| Drop `cyber` | 87.49 | 0.101 | 0.824 | no basta |
+| `max_alt_m=200` | 87.87 | 0.067 | 0.875 | descartar |
+| `min_det_conf=0.9` | 85.44 | 0.084 | 0.804 | mantener como filtro |
+| Drop clase `Unknown` | 80.12 | 0.133 | 0.676 | mantener |
+| Drop `Unknown` + `min_det_conf=0.9` | 79.16 | 0.132 | 0.656 | buena combinación |
+| **Drop `Unknown` + `min_det_conf=0.9` + drop `cyber`** | **79.09** | **0.136** | **0.627** | **baseline actual** |
+| Drop `Unknown` + drop solo-azimut + `cyber` | 80.15 | 0.147 | 0.653 | similar, más IDs |
+| Solo radar + cyber + other con clase dron | 80.15 | 0.147 | 0.653 | alternativa simple |
+| Postfiltro `tube_merge` r=25–50 m | 79.09 | 0.136 | 0.627 | sin efecto; no activar |
+| Postfiltro `tube_merge` r=200 m | 79.08 | 0.136 | 0.627 | riesgo de fusionar drones reales |
+| Postfiltro combinado `fill_gaps` + `moving_average` + `plausibility` + `tube_merge` | 78.84 | 0.110 | 0.627 | no adoptar: baja recall |
 
 El rerun controlado de la calibración MAD con el tracker actual da 88.84, no el 88.23 histórico; aquel artefacto era anterior al commit `479bfab`. Evidencia en `reports/sigma_mad_vs_labels/`.
+
+Las variantes de filtrado se probaron sobre el mismo `data/interim` y la mejor se adoptó en `config.yaml`. Baja el GOSPA de 87.76 a 79.09, sobre todo por cardinalidad: tracks/ts 2.65 → 1.74 y falsos/ts 2.27 → 1.24, con recall 0.111 → 0.136. Sigue lejos de <50 m porque el 93 % del GOSPA es cardinalidad y los tracks fantasma largos de radar con clase dron persisten. Evidencia en `reports/prefilter_experiments/summary.csv` y `best_config.yaml`.
 
 Probado y revertido: `merge_distance` 15/25/50, `hits_to_confirm` 2/4, `chi2_gate` 16.3, `q`/`σ_v`/`use_altitude`, y evaluar solo `confirmed`. El detalle está en `reports/`.
 
@@ -543,7 +557,7 @@ No hay umbrales mínimos para las métricas que debamos superar, pero los siguie
 
 | Área | Métrica oficial | Peso | Rango típico | Objetivo interno | Baseline actual |
 |---|---|---:|---|---|---|
-| Tracking | GOSPA ($c=50$ m, $p=2$) | 0.4 | 20–100 m | < 50 m | 73.1–106.4 m (media 87.8) |
+| Tracking | GOSPA ($c=50$ m, $p=2$) | 0.4 | 20–100 m | < 50 m | 69.6–89.8 m (media 79.1) |
 | Clasificación | Recall | 0.2 | 0.60–0.90 | > 0.75 | pendiente |
 | Identificación | Recall | 0.1 | 0.50–0.90 | > 0.70 | pendiente |
 | Fusión | Acierto de metadatos | 0.3 | 0.50–0.80 | > 0.70 | pendiente |
